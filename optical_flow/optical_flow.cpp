@@ -119,7 +119,8 @@ int main(int argc, char **argv) {
 
     for (int i = 0; i < img_size; ++i)
     {
-        color_1[i] = static_cast<float>(img1.data[i]) / 255.0f;  // 归一化为 [0, 1] 范围内的浮点数
+        // color_1[i] = static_cast<float>(img1.data[i]) / 255.0f;  // 归一化为 [0, 1] 范围内的浮点数
+        color_1[i] = static_cast<float>(img1.data[i]);
     }
 
     FrameHessian* fh_last = new FrameHessian();
@@ -141,7 +142,8 @@ int main(int argc, char **argv) {
 
     for (int i = 0; i < img_size; ++i)
     {
-        color_2[i] = static_cast<float>(img2.data[i]) / 255.0f;  // 归一化为 [0, 1] 范围内的浮点数
+        // color_2[i] = static_cast<float>(img2.data[i]) / 255.0f;  // 归一化为 [0, 1] 范围内的浮点数
+        color_2[i] = static_cast<float>(img2.data[i]);  
     }
 
     FrameHessian* fh_cur = new FrameHessian();
@@ -159,6 +161,9 @@ int main(int argc, char **argv) {
     Mat img2_CV2;
     cv::cvtColor(img2, img2_CV2, cv::COLOR_GRAY2BGR);
     for (int i = 0; i < fh_cur->keypoints.size(); i++) {
+        if (fh_cur->keypoints[i] == Eigen::Vector2f::Zero()) {
+            continue;
+        }
         KeyPoint pt2;
         pt2.pt.x = fh_cur->keypoints[i](0);
         pt2.pt.y = fh_cur->keypoints[i](1);

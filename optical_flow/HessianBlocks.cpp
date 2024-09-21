@@ -75,6 +75,98 @@ void FrameHessian::release()
 }
 
 
+
+// Gaussian kernel for 5x5 filtering
+const float gaussianKernel[5][5] = {
+    {1 / 256.0f,  4 / 256.0f,  6 / 256.0f,  4 / 256.0f, 1 / 256.0f},
+    {4 / 256.0f, 16 / 256.0f, 24 / 256.0f, 16 / 256.0f, 4 / 256.0f},
+    {6 / 256.0f, 24 / 256.0f, 36 / 256.0f, 24 / 256.0f, 6 / 256.0f},
+    {4 / 256.0f, 16 / 256.0f, 24 / 256.0f, 16 / 256.0f, 4 / 256.0f},
+    {1 / 256.0f,  4 / 256.0f,  6 / 256.0f,  4 / 256.0f, 1 / 256.0f}
+};
+
+// Apply Gaussian smoothing
+void applyGaussianBlur(Eigen::Vector3f* inputImage, Eigen::Vector3f* outputImage, int width, int height) {
+    for (int y = 2; y < height - 2; y++) {
+        for (int x = 2; x < width - 2; x++) {
+            float sum = 0.0f;
+            for (int ky = -2; ky <= 2; ky++) {
+                for (int kx = -2; kx <= 2; kx++) {
+                    sum += inputImage[(y + ky) * width + (x + kx)][0] * gaussianKernel[ky + 2][kx + 2];
+                }
+            }
+            outputImage[y * width + x][0] = sum;
+        }
+    }
+}
+
+// Downsample with Gaussian filtering
+void downsampleWithGaussian(Eigen::Vector3f* inputImage, Eigen::Vector3f* outputImage, int inputWidth, int inputHeight) {
+    applyGaussianBlur(inputImage, inputImage, inputWidth, inputHeight);  // Apply Gaussian smoothing
+    
+    int outputWidth = inputWidth / 2;
+    int outputHeight = inputHeight / 2;
+
+    for (int y = 0; y < outputHeight; y++) {
+        for (int x = 0; x < outputWidth; x++) {
+            outputImage[y * outputWidth + x] = inputImage[(2 * y) * inputWidth + (2 * x)];  // Downsample by taking every second pixel
+        }
+    }
+}
+
+
+// void FrameHessian::makeImages(float* color) {
+//     int ww = 752, hh = 480;
+//     wG[0] = ww;
+//     hG[0] = hh;
+
+//     for (int level = 1; level < pyrLevelsUsed; ++level) {
+//         wG[level] = ww >> level;
+//         hG[level] = hh >> level;
+//     }
+
+//     for (int i = 0; i < pyrLevelsUsed; i++) {
+//         std::cout << wG[i] << ", " << hG[i] << std::endl;
+//         dIp[i] = new Eigen::Vector3f[wG[i] * hG[i]];
+//         absSquaredGrad[i] = new float[wG[i] * hG[i]];
+//     }
+//     dI = dIp[0];
+
+//     // Initialize the base level image
+//     int w = wG[0];
+//     int h = hG[0];
+//     for (int i = 0; i < w * h; i++) {
+//         dI[i][0] = color[i];
+//     }
+
+//     // Process each pyramid level
+//     for (int lvl = 0; lvl < pyrLevelsUsed; lvl++) {
+//         int wl = wG[lvl], hl = hG[lvl];
+//         Eigen::Vector3f* dI_l = dIp[lvl];
+//         float* dabs_l = absSquaredGrad[lvl];
+
+// 		if (lvl > 0) {
+// 			// Downsample from previous level using Gaussian filtering
+// 			downsampleWithGaussian(dIp[lvl - 1], dI_l, wG[lvl - 1], hG[lvl - 1]);
+// 		}
+
+//         // Compute gradient at this level
+//         for (int idx = wl; idx < wl * (hl - 1); idx++) {
+//             float dx = 0.5f * (dI_l[idx + 1][0] - dI_l[idx - 1][0]);
+//             float dy = 0.5f * (dI_l[idx + wl][0] - dI_l[idx - wl][0]);
+
+//             if (!std::isfinite(dx)) dx = 0;
+//             if (!std::isfinite(dy)) dy = 0;
+
+//             dI_l[idx][1] = dx;
+//             dI_l[idx][2] = dy;
+
+//             dabs_l[idx] = dx * dx + dy * dy;
+//         }
+//     }
+// }
+
+
 void FrameHessian::makeImages(float* color)
 {
 	int ww= 752, hh = 480;
