@@ -92,9 +92,10 @@ struct CameraParams {
                    const Eigen::Vector4d& _projection_parameters, const Eigen::Vector4d& _distortion_parameters) : 
         model_type(_model_type), camera_name(_camera_name),
         scaling_ratio(_scaling_ratio), width(_image_width),
-        height(_image_height), projection_parameters(_projection_parameters),
-        distortion_parameters(_distortion_parameters) {
-        std::cout << "load CameraParams: " 
+        height(_image_height), distortion_parameters(_distortion_parameters),
+        projection_parameters(_projection_parameters) {
+        
+            std::cout << "load CameraParams: " 
                         << "\n model_type    : " << model_type
                         << "\n camera_name   : " << camera_name
                         << "\n scaling_ratio : " << scaling_ratio 
@@ -183,7 +184,7 @@ struct CalibrationData {
     }
  
     CalibrationData(std::string &_version, double &_car_id, CameraParams &_intrinsic_camera, IMUParams &_intrinsic_imu, WheelParams &_intrinsic_wheel, ExtrinsicTransform &_extrinsic_body_T_cam0, ExtrinsicTransform &_extrinsic_body_T_wheel, ExtrinsicTransform &_extrinsic_body_T_cam1)
-        : version(_version), car_id(_car_id), intrinsic_camera(_intrinsic_camera), intrinsic_imu(_intrinsic_imu), intrinsic_wheel(_intrinsic_wheel), extrinsic_body_T_cam0(_extrinsic_body_T_cam0), extrinsic_body_T_wheel(_extrinsic_body_T_wheel), extrinsic_body_T_cam1(_extrinsic_body_T_cam1) {
+        : version(_version), car_id(_car_id), intrinsic_camera(_intrinsic_camera), intrinsic_imu(_intrinsic_imu), intrinsic_wheel(_intrinsic_wheel), extrinsic_body_T_cam0(_extrinsic_body_T_cam0), extrinsic_body_T_cam1(_extrinsic_body_T_cam1), extrinsic_body_T_wheel(_extrinsic_body_T_wheel) {
             std::cout << "\nload extrinsic_body_T_cam0: \n" << extrinsic_body_T_cam0.transform << "\n td : " << extrinsic_body_T_cam0.td
                             << "\nload extrinsic_body_T_cam1: \n" << extrinsic_body_T_cam1.transform << "\n td : " << extrinsic_body_T_cam1.td
                             << "\nload extrinsic_body_T_wheel: \n" << extrinsic_body_T_wheel.transform << "\n td : " << extrinsic_body_T_wheel.td

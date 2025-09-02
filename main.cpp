@@ -28,8 +28,13 @@ inline std::string GetMainConfigPath() {
 }
 
 int main(int argc, char** argv) {
+    std::string config_path;
+    if (argc > 1) {
+        config_path = argv[1];
+    } else {
+        config_path = GetMainConfigPath();
+    }
     // Load main configuration
-    std::string config_path = GetMainConfigPath();
     std::cout << "Loading configuration from: " << config_path << std::endl;
     
     MainConfig config;
