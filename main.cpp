@@ -7,6 +7,7 @@
 #include <iostream>
 #include <iomanip>
 #include "data_prepare.hpp"
+#include "sfm_reconstructor.hpp"
 
 
 int main(int argc, char** argv) {
@@ -24,6 +25,23 @@ int main(int argc, char** argv) {
     
     RawImageData target_image;
     std::vector<RawImageData> query_images;
-    LoadRawImageData(10,10,10,target_image,query_images);
+    LoadRawImageData(10, 10, 10, target_image, query_images);
+
+
+    SFMOptions opts; 
+    opts.enable_ba = true; 
+    opts.ba_max_iterations = 80; 
+    opts.prior_trans_sigma = 0.05; 
+    opts.prior_rot_sigma_rad = 2.0*M_PI/180.0;
+    
+    SFMReconstructor recon(calibration_data, opts);
+
+
+    std::cout << "Start reconstruction" << std::endl;
+    // 2) 重建 + BA
+    SFMResult result = recon.Reconstruct(query_images);
+
+    std::cout << "End reconstruction" << std::endl;
+
     return 0;
 }

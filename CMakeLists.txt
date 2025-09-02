@@ -18,7 +18,7 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
 find_package(Eigen3 REQUIRED)
 find_package(PkgConfig REQUIRED)
 find_package(OpenCV REQUIRED)
-
+find_package(Ceres REQUIRED)
 # 查找yaml-cpp
 pkg_check_modules(YAML_CPP REQUIRED yaml-cpp)
 
@@ -26,7 +26,7 @@ pkg_check_modules(YAML_CPP REQUIRED yaml-cpp)
 message(STATUS "Eigen3 found: ${Eigen3_VERSION}")
 message(STATUS "OpenCV found: ${OpenCV_VERSION}")
 message(STATUS "yaml-cpp found: ${YAML_CPP_VERSION}")
-
+message(STATUS "Ceres found: ${Ceres_VERSION}")
 # 创建data_prepare库
 add_library(data_prepare data_prepare.cpp data_prepare.hpp)
 
@@ -46,19 +46,25 @@ target_link_libraries(data_prepare PUBLIC
     stdc++fs
 )
 
+
+add_library(sfm_reconstructor sfm_reconstructor.cpp sfm_reconstructor.hpp)
+
+target_link_libraries(sfm_reconstructor PRIVATE Eigen3::Eigen ceres ${OpenCV_LIBS})
+
 # 创建主可执行文件
-add_executable(slam main.cpp)
+add_executable(app main.cpp)
 
 # 设置slam可执行文件的包含目录
-target_include_directories(slam PRIVATE
+target_include_directories(app PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${EIGEN3_INCLUDE_DIR}
     ${OpenCV_INCLUDE_DIRS}
 )
 
 # 链接slam可执行文件的依赖
-target_link_libraries(slam PRIVATE
+target_link_libraries(app PRIVATE
     data_prepare
     ${OpenCV_LIBS}
     Eigen3::Eigen
+    sfm_reconstructor
 )
