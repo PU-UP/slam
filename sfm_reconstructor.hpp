@@ -30,29 +30,7 @@
 #include "data_prepare.hpp"
 
 
-// 轻量配置选项
-struct SFMOptions {
-    int max_features = 2000;            // ORB特征上限
-    int min_tracked_for_pnp = 30;       // PnP所需最少对应
-    double match_ratio = 0.75;          // 描述子比值测试
-    double ransac_reproj_thresh = 2.0;  // PnP RANSAC像素阈值
-    double triang_min_parallax_deg = 1.0; // 三角化最小视差角
-    int klt_win_size = 21;
-    int klt_max_level = 3;
-    int klt_max_iter = 30;
-    double klt_eps = 0.01;
-    bool use_optical_flow_tracking = true;
-    bool refine_with_pnp = true;
-    bool undistort = true;
-
-    // BA 相关
-    bool enable_ba = true;
-    int ba_max_iterations = 60;
-    double ba_huber_delta_px = 1.0;      // 重投影Huber阈值（像素）
-    bool fix_first_pose = true;          // 固定第一帧，以消除尺度/坐标自由度
-    double prior_trans_sigma = 0.05;     // 轮式先验平移sigma（m）
-    double prior_rot_sigma_rad = 2.0 * M_PI / 180.0; // 轮式先验旋转sigma（rad）
-};
+// SFMOptions is defined in data_prepare.hpp to avoid circular dependency
 
 struct SFMResult {
     std::vector<Eigen::Matrix4d> cam_poses_w_c;
@@ -77,7 +55,7 @@ struct Frame {
     std::vector<cv::KeyPoint> kps;
     cv::Mat desc;
     std::vector<cv::Point2f> px;
-    Eigen::Matrix4d T_w_c = Eigen::Matrix4d::Identity();
+    Eigen::Matrix4d T_w_c = Eigen::Matrix4d::Identity();  // World to Camera transformation (base coordinate system)
 };
 
 // ====== Ceres 误差项 ======
@@ -167,7 +145,7 @@ public:
 
 private:
     static cv::Mat toGray(const cv::Mat& img);
-    Eigen::Matrix4d wheelPoseToCamPose(const Eigen::Matrix4d& T_w_wheel) const;
+    Eigen::Matrix4d wheelPoseToCamPose(const Eigen::Matrix4d& T_w_wheel) const;  // Convert wheel pose (world->wheel) to camera pose (world->camera)
 
     static void decomposeTcw(const Eigen::Matrix4d& T_w_c, cv::Mat& rvec, cv::Mat& tvec);
     static Eigen::Matrix4d composeTwc(const cv::Mat& rvec, const cv::Mat& tvec);

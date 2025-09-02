@@ -1,0 +1,52 @@
+# SLAM Main Configuration File
+# This file contains configuration parameters for the main SLAM application
+
+# Data loading parameters
+data:
+  target_image_id: 10
+  query_image_start_id: 11
+  query_image_count: 10
+  query_image_length: 10
+
+# SFM reconstruction parameters
+sfm:
+  # Feature extraction
+  max_features: 2000
+  min_tracked_for_pnp: 30
+  match_ratio: 0.75
+  
+  # Tracking
+  use_optical_flow_tracking: true
+  klt_win_size: 21
+  klt_max_level: 3
+  klt_max_iter: 30
+  klt_eps: 0.01
+  
+  # Pose estimation
+  refine_with_pnp: true
+  ransac_reproj_thresh: 2.0
+  
+  # Triangulation
+  triang_min_parallax_deg: 1.0
+  undistort: true
+  
+  # Bundle adjustment
+  enable_ba: true
+  ba_max_iterations: 80
+  ba_huber_delta_px: 1.0
+  fix_first_pose: true
+  
+  # Wheel odometry priors
+  prior_trans_sigma: 0.05
+  prior_rot_sigma_rad: 0.034906585  # 2 degrees in radians
+
+# Debug and visualization options
+debug:
+  enable_debug: true
+  save_intermediate: true
+  output_dir: "../build/output"
+
+# File paths
+paths:
+  calibration_config: "../calibration_config.yaml"
+  output_prefix: "slam_"

@@ -36,8 +36,17 @@ SFMReconstructor::SFMReconstructor(const CalibrationData& calibration_data, cons
 }
 
 SFMResult SFMReconstructor::Reconstruct(const std::vector<RawImageData>& seq) {
+    if (opts_.debug) {
+        std::cout << "[SFM] Starting reconstruction with " << seq.size() << " frames" << std::endl;
+    }
+    
     reset();
     if (seq.empty()) return {};
+    
+    // Create output directory if needed
+    if (opts_.save_intermediate) {
+        std::filesystem::create_directories(opts_.output_dir);
+    }
     
     frames_.reserve(seq.size());
     for (const auto& r : seq) {
@@ -49,25 +58,67 @@ SFMResult SFMReconstructor::Reconstruct(const std::vector<RawImageData>& seq) {
         frames_.push_back(std::move(f));
     }
     
+    if (opts_.debug) {
+        std::cout << "[SFM] Initialized " << frames_.size() << " frames" << std::endl;
+    }
+    
     extractFeatures(0);
+    if (opts_.debug) {
+        std::cout << "[SFM] Frame 0: Extracted " << frames_[0].kps.size() << " features" << std::endl;
+    }
     initTracksFromKeypoints(0);
     
     int last_kf = 0;
     for (int i = 1; i < (int)frames_.size(); ++i) {
+        if (opts_.debug) {
+            std::cout << "[SFM] Processing frame " << i << "/" << frames_.size() << std::endl;
+        }
+        
         extractAndTrack(i - 1, i);
+        if (opts_.debug) {
+            std::cout << "[SFM] Tracked " << frames_[i].px.size() << " features from frame " << i-1 << std::endl;
+        }
+        
         if ((int)frames_[i].px.size() < opts_.min_tracked_for_pnp) {
             detectAndCompute(i);
             matchAndAppend(i - 1, i);
+            if (opts_.debug) {
+                std::cout << "[SFM] Detected " << frames_[i].kps.size() << " new features" << std::endl;
+            }
         }
+        
         if (opts_.refine_with_pnp) refinePosePnP(i);
         updateLandmarkObservations(i);        // 将已有码点尽可能关联为观测
         triangulateBetween(last_kf, i);
+        
         if (isGoodBaseline(frames_[last_kf].T_w_c, frames_[i].T_w_c)) {
+            if (opts_.debug) {
+                std::cout << "[SFM] New keyframe: " << i << std::endl;
+            }
             last_kf = i;
+        }
+        
+        // Save intermediate results
+        if (opts_.save_intermediate && i % 5 == 0) {
+            SaveForViz(opts_.output_dir, "intermediate_" + std::to_string(i) + "_");
         }
     }
     
-    if (opts_.enable_ba) RunBundleAdjustment();
+    if (opts_.debug) {
+        std::cout << "[SFM] Total landmarks: " << landmarks_.size() << std::endl;
+        std::cout << "[SFM] Initialized landmarks: " << std::count_if(landmarks_.begin(), landmarks_.end(), 
+            [](const auto& kv) { return kv.second.is_initialized; }) << std::endl;
+    }
+    
+    if (opts_.enable_ba) {
+        if (opts_.debug) {
+            std::cout << "[SFM] Running bundle adjustment..." << std::endl;
+        }
+        RunBundleAdjustment();
+        if (opts_.debug) {
+            std::cout << "[SFM] Bundle adjustment completed" << std::endl;
+        }
+    }
     
     SFMResult res;
     res.cam_poses_w_c.reserve(frames_.size());
@@ -81,6 +132,17 @@ SFMResult SFMReconstructor::Reconstruct(const std::vector<RawImageData>& seq) {
             res.points_w.push_back(kv.second.Xw);
         }
     }
+    
+    if (opts_.debug) {
+        std::cout << "[SFM] Reconstruction completed. " << res.cam_poses_w_c.size() << " poses, " 
+                  << res.points_w.size() << " points" << std::endl;
+    }
+    
+    // Save final results
+    if (opts_.save_intermediate) {
+        SaveForViz(opts_.output_dir, "final_");
+    }
+    
     return res;
 }
 
