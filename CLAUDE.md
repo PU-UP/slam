@@ -14,7 +14,11 @@ cmake ..
 # Build the project
 make -j$(nproc)
 
-# The main executable is named 'app'
+# Available executables:
+# - app: Main application (data loading demonstration)
+# - pipeline_demo: Visual SLAM pipeline demo with real images
+# - test_feature_extractor: Feature extraction module test
+# - test_feature_tracker: Feature tracking module test
 ```
 
 ## Dependencies
@@ -27,7 +31,7 @@ The project requires:
 
 ## Project Architecture
 
-This is a SLAM (Simultaneous Localization and Mapping) practice project with two main components:
+This is a cleaned SLAM (Simultaneous Localization and Mapping) practice project focused on core visual pipeline components:
 
 ### Core Libraries
 
@@ -37,18 +41,23 @@ This is a SLAM (Simultaneous Localization and Mapping) practice project with two
    - Provides data structures for sensor calibration and raw image data
    - Uses Eigen for matrix operations and yaml-cpp for configuration parsing
 
-2. **sfm_reconstructor** (`sfm_reconstructor.cpp/.hpp`):
-   - Implements incremental Structure from Motion (SfM) with visual odometry
-   - Uses ORB feature detection and LK optical flow for tracking
-   - Performs bundle adjustment with Ceres Solver including wheel odometry priors
-   - Exports results to CSV/JSON for visualization
+2. **modules** (in `src/` directory):
+   - **Feature Extractors** (`feature_extractors.cpp`): ORB feature detection
+   - **Feature Trackers** (`feature_trackers.cpp`): Lucas-Kanade optical flow tracking
+   - **Depth Estimators** (`depth_estimators.cpp`): Triangulation and 3D point reconstruction
+   - **Bundle Adjusters** (`bundle_adjusters.cpp`): Ceres-based pose and point optimization
 
-### Main Application
+### Applications
 
-- **main.cpp**: Demonstrates usage by loading calibration data and running SfM reconstruction
+- **main.cpp**: Demonstrates configuration and calibration data loading
+- **pipeline_demo.cpp**: Complete visual SLAM pipeline demonstration with real images
+  - Loads real images from `/home/watermango/data/raw_data_for_loop_closure/image/`
+  - Demonstrates feature extraction, tracking, depth estimation, and bundle adjustment
+  - Includes visualization for all pipeline stages
 
 ### Configuration
 
+- **config.yaml**: Main configuration with image paths and debug options
 - **calibration_config.yaml**: Contains camera intrinsics, IMU parameters, wheel parameters, and extrinsic transformations between sensors
 - The configuration includes transformations between body, camera, wheel, and RTK coordinate frames
 
@@ -57,21 +66,32 @@ This is a SLAM (Simultaneous Localization and Mapping) practice project with two
 - `CalibrationData`: Complete sensor calibration information
 - `CameraParams`: Pinhole camera model with distortion parameters
 - `RawImageData`: Image with associated wheel pose and timestamp
-- `SFMResult`: Output containing camera poses and 3D points
-- `Frame`: Internal representation for SfM processing
+- `FeatureExtractor::FeaturesResult`: Feature extraction results
+- `FeatureTracker::TrackingResult`: Feature tracking results
+- `DepthEstimator::DepthResult`: 3D triangulation results
+- `BundleAdjuster::BAResult`: Bundle adjustment optimization results
 
-### SfM Pipeline
+### Visual SLAM Pipeline
 
-The reconstruction pipeline follows this flow:
-1. Load calibration data and extract features
-2. Track features between frames using optical flow
-3. Refine poses with PnP when sufficient features are tracked
-4. Triangulate new landmarks between keyframes
-5. Run global bundle adjustment with wheel odometry priors
-6. Export results for visualization
+The complete pipeline follows this flow:
+1. **Configuration Loading**: Load main config and calibration data
+2. **Feature Extraction**: ORB feature detection on first frame
+3. **Feature Tracking**: LK optical flow tracking between frames
+4. **Depth Estimation**: 3D point triangulation using wheel-to-camera poses
+5. **Bundle Adjustment**: Joint optimization of poses and 3D points
+6. **Visualization**: Display results for each pipeline stage
+
+### Key Technical Details
+
+- **Coordinate Transformations**: Uses wheel-to-camera extrinsic transformation from calibration data
+- **Real Image Processing**: Processes actual images from specified dataset paths
+- **Comprehensive Visualization**: Real-time display of features, tracks, 3D points, and reprojection errors
+- **Performance Metrics**: Reports processing time and accuracy metrics for each stage
 
 ## Common Issues
 
-- The main.cpp:37 references undefined variables `K`, `dist`, `T_wheel_cam` - these need to be extracted from calibration data
-- Feature tracking uses nearest-neighbor matching which may need robustification for production use
-- Bundle adjustment currently fixes the first frame pose to eliminate scale ambiguity
+- All calibration data (K, dist, T_wheel_cam) is properly loaded from configuration files
+- Feature tracking uses LK optical flow with geometric consistency checks
+- Bundle adjustment uses Ceres Solver with robust loss functions
+- Pipeline demo requires access to the specified image paths
+- Visualization windows may require manual closing due to waitKey calls

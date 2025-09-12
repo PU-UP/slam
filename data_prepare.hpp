@@ -8,34 +8,6 @@
 #include <opencv2/opencv.hpp>
 #include <filesystem>
 
-// Forward declaration to avoid circular dependency
-struct SFMOptions {
-    int max_features = 2000;            // ORB特征上限
-    int min_tracked_for_pnp = 30;       // PnP所需最少对应
-    double match_ratio = 0.75;          // 描述子比值测试
-    double ransac_reproj_thresh = 2.0;  // PnP RANSAC像素阈值
-    double triang_min_parallax_deg = 1.0; // 三角化最小视差角
-    int klt_win_size = 21;
-    int klt_max_level = 3;
-    int klt_max_iter = 30;
-    double klt_eps = 0.01;
-    bool use_optical_flow_tracking = true;
-    bool refine_with_pnp = true;
-    bool undistort = true;
-
-    // BA 相关
-    bool enable_ba = true;
-    int ba_max_iterations = 60;
-    double ba_huber_delta_px = 1.0;      // 重投影Huber阈值（像素）
-    bool fix_first_pose = true;          // 固定第一帧，以消除尺度/坐标自由度
-    double prior_trans_sigma = 0.05;     // 轮式先验平移sigma（m）
-    double prior_rot_sigma_rad = 2.0 * M_PI / 180.0; // 轮式先验旋转sigma（rad）
-
-    // Debug and visualization options
-    bool debug = false;                 // 打印详细调试信息
-    bool save_intermediate = false;     // 保存中间结果
-    std::string output_dir = "./output"; // 输出目录
-};
 
 // 为Eigen类型添加yaml-cpp转换支持
 namespace YAML {
@@ -307,9 +279,6 @@ struct MainConfig {
     int query_image_start_id = 1;
     int query_image_count = 10;
     int query_image_length = 10;
-    
-    // SFM options
-    SFMOptions sfm_options;
     
     // Debug options
     bool enable_debug = true;

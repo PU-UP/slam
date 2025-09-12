@@ -27,6 +27,36 @@ message(STATUS "Eigen3 found: ${Eigen3_VERSION}")
 message(STATUS "OpenCV found: ${OpenCV_VERSION}")
 message(STATUS "yaml-cpp found: ${YAML_CPP_VERSION}")
 message(STATUS "Ceres found: ${Ceres_VERSION}")
+# 设置包含目录
+include_directories(${CMAKE_CURRENT_SOURCE_DIR})
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+# 创建modules库
+add_library(modules
+    src/modules.cpp
+    src/feature_extractors.cpp
+    src/feature_trackers.cpp
+    src/depth_estimators.cpp
+    src/bundle_adjusters.cpp
+)
+
+# 设置modules库的包含目录
+target_include_directories(modules PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${EIGEN3_INCLUDE_DIR}
+    ${OpenCV_INCLUDE_DIRS}
+    ${CERES_INCLUDE_DIRS}
+)
+
+# 链接modules库的依赖
+target_link_libraries(modules PUBLIC
+    ${OpenCV_LIBS}
+    Eigen3::Eigen
+    stdc++fs
+    ceres
+)
+
 # 创建data_prepare库
 add_library(data_prepare data_prepare.cpp data_prepare.hpp)
 
@@ -47,9 +77,24 @@ target_link_libraries(data_prepare PUBLIC
 )
 
 
-add_library(sfm_reconstructor sfm_reconstructor.cpp sfm_reconstructor.hpp)
 
-target_link_libraries(sfm_reconstructor PRIVATE Eigen3::Eigen ceres ${OpenCV_LIBS})
+# 创建测试可执行文件
+add_executable(test_feature_extractor test/test_feature_extractor.cpp)
+add_executable(test_feature_tracker test/test_feature_tracker.cpp)
+
+# 链接测试可执行文件的依赖
+target_link_libraries(test_feature_extractor PRIVATE
+    modules
+    ${OpenCV_LIBS}
+    Eigen3::Eigen
+)
+
+target_link_libraries(test_feature_tracker PRIVATE
+    modules
+    ${OpenCV_LIBS}
+    Eigen3::Eigen
+)
+
 
 # 创建主可执行文件
 add_executable(app main.cpp)
@@ -64,7 +109,28 @@ target_include_directories(app PRIVATE
 # 链接slam可执行文件的依赖
 target_link_libraries(app PRIVATE
     data_prepare
+    modules
     ${OpenCV_LIBS}
     Eigen3::Eigen
-    sfm_reconstructor
+    ${YAML_CPP_LIBRARIES}
 )
+
+# 创建pipeline演示可执行文件
+add_executable(pipeline_demo pipeline_demo.cpp)
+
+# 设置pipeline_demo可执行文件的包含目录
+target_include_directories(pipeline_demo PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${EIGEN3_INCLUDE_DIR}
+    ${OpenCV_INCLUDE_DIRS}
+)
+
+# 链接pipeline_demo可执行文件的依赖
+target_link_libraries(pipeline_demo PRIVATE
+    data_prepare
+    modules
+    ${OpenCV_LIBS}
+    Eigen3::Eigen
+    ${YAML_CPP_LIBRARIES}
+)
+

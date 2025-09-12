@@ -1,4 +1,5 @@
 #include <Eigen/Dense>
+#include <opencv2/highgui.hpp>
 #include <opencv2/opencv.hpp>
 #include <vector>
 #include <algorithm>
@@ -7,7 +8,7 @@
 #include <iostream>
 #include <iomanip>
 #include "data_prepare.hpp"
-#include "sfm_reconstructor.hpp"
+#include "include/slam/modules.hpp"
 
 // Configuration file path finder
 inline std::string GetMainConfigPath() {
@@ -72,21 +73,6 @@ int main(int argc, char** argv) {
         std::cout << "Target image ID: " << target_image.id << std::endl;
     }
     
-    // Create SFM reconstructor with configuration
-    SFMReconstructor recon(calibration_data, config.sfm_options);
-    
-    std::cout << "Start reconstruction" << std::endl;
-    
-    // Run reconstruction
-    SFMResult result = recon.Reconstruct(query_images);
-    
-    std::cout << "End reconstruction" << std::endl;
-    
-    if (config.enable_debug) {
-        std::cout << "Reconstruction results:" << std::endl;
-        std::cout << "  Camera poses: " << result.cam_poses_w_c.size() << std::endl;
-        std::cout << "  3D points: " << result.points_w.size() << std::endl;
-    }
 
     return 0;
 }

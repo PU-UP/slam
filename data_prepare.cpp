@@ -307,29 +307,6 @@ bool LoadMainConfiguration(const std::string& config_path, MainConfig& config) {
             config.query_image_length = data_node["query_image_length"].as<int>(config.query_image_length);
         }
         
-        // Load SFM parameters
-        if (config_file["sfm"]) {
-            const auto& sfm_node = config_file["sfm"];
-            config.sfm_options.max_features = sfm_node["max_features"].as<int>(config.sfm_options.max_features);
-            config.sfm_options.min_tracked_for_pnp = sfm_node["min_tracked_for_pnp"].as<int>(config.sfm_options.min_tracked_for_pnp);
-            config.sfm_options.match_ratio = sfm_node["match_ratio"].as<double>(config.sfm_options.match_ratio);
-            config.sfm_options.use_optical_flow_tracking = sfm_node["use_optical_flow_tracking"].as<bool>(config.sfm_options.use_optical_flow_tracking);
-            config.sfm_options.klt_win_size = sfm_node["klt_win_size"].as<int>(config.sfm_options.klt_win_size);
-            config.sfm_options.klt_max_level = sfm_node["klt_max_level"].as<int>(config.sfm_options.klt_max_level);
-            config.sfm_options.klt_max_iter = sfm_node["klt_max_iter"].as<int>(config.sfm_options.klt_max_iter);
-            config.sfm_options.klt_eps = sfm_node["klt_eps"].as<double>(config.sfm_options.klt_eps);
-            config.sfm_options.refine_with_pnp = sfm_node["refine_with_pnp"].as<bool>(config.sfm_options.refine_with_pnp);
-            config.sfm_options.ransac_reproj_thresh = sfm_node["ransac_reproj_thresh"].as<double>(config.sfm_options.ransac_reproj_thresh);
-            config.sfm_options.triang_min_parallax_deg = sfm_node["triang_min_parallax_deg"].as<double>(config.sfm_options.triang_min_parallax_deg);
-            config.sfm_options.undistort = sfm_node["undistort"].as<bool>(config.sfm_options.undistort);
-            config.sfm_options.enable_ba = sfm_node["enable_ba"].as<bool>(config.sfm_options.enable_ba);
-            config.sfm_options.ba_max_iterations = sfm_node["ba_max_iterations"].as<int>(config.sfm_options.ba_max_iterations);
-            config.sfm_options.ba_huber_delta_px = sfm_node["ba_huber_delta_px"].as<double>(config.sfm_options.ba_huber_delta_px);
-            config.sfm_options.fix_first_pose = sfm_node["fix_first_pose"].as<bool>(config.sfm_options.fix_first_pose);
-            config.sfm_options.prior_trans_sigma = sfm_node["prior_trans_sigma"].as<double>(config.sfm_options.prior_trans_sigma);
-            config.sfm_options.prior_rot_sigma_rad = sfm_node["prior_rot_sigma_rad"].as<double>(config.sfm_options.prior_rot_sigma_rad);
-        }
-        
         // Load debug options
         if (config_file["debug"]) {
             const auto& debug_node = config_file["debug"];
@@ -345,10 +322,6 @@ bool LoadMainConfiguration(const std::string& config_path, MainConfig& config) {
             config.output_prefix = paths_node["output_prefix"].as<std::string>(config.output_prefix);
         }
         
-        // Set SFM debug and save options
-        config.sfm_options.debug = config.enable_debug;
-        config.sfm_options.save_intermediate = config.save_intermediate;
-        config.sfm_options.output_dir = config.output_dir;
         
         return true;
     } catch (const YAML::Exception& e) {
