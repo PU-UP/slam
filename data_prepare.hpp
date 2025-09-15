@@ -637,3 +637,13 @@ private:
 };
 
 } // namespace bagio
+
+struct Event {
+    enum Type { IMU, ODOM } type;
+    double t;
+    std::shared_ptr<bagio::ImuData> imu;
+    std::shared_ptr<bagio::OdomData> odom;
+};
+struct CmpEvent {
+    bool operator()(const Event& a, const Event& b) const { return a.t > b.t; }
+};

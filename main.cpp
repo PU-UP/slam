@@ -1,6 +1,7 @@
 #include <Eigen/Dense>
 #include <opencv2/highgui.hpp>
 #include <opencv2/opencv.hpp>
+#include <string>
 #include <vector>
 #include <algorithm>
 #include <cmath>
@@ -9,6 +10,8 @@
 #include <iomanip>
 #include "data_prepare.hpp"
 #include "include/slam/modules.hpp"
+
+#include "eskf/eskf.hpp"
 
 // Configuration file path finder
 inline std::string GetMainConfigPath() {
@@ -89,8 +92,81 @@ int main(int argc, char** argv) {
     std::cout << "Time range: [" << std::to_string(data_loader.startTime())
               << ", " << std::to_string(data_loader.endTime())  
               << "]  duration=" << data_loader.duration() << " s\n";
+              
+    auto qi = data_loader.imuQueue();
+    auto qo = data_loader.odomQueue();
+
+    using namespace eskf;
+    // 2) 配置 ESKF
+    Config cfg;
+    cfg.g_world = Eigen::Vector3d(0,0,-9.81);
+    cfg.wheel_scale = 1.0;
+
+    // 外参：T_wb（wheel<-body），示例设置（请替换为你的实际标定）
+    cfg.T_wb = Eigen::Isometry3d(calibration_data.extrinsic_body_T_wheel.transform.inverse());
+    
+    ESKF filter(cfg);
+
+    std::priority_queue<Event, std::vector<Event>, CmpEvent> pq;
+    if (!qi.empty()) { auto m = qi.front(); qi.pop(); pq.push({Event::IMU,  m->timestamp, m, {}}); }
+    if (!qo.empty()) { auto m = qo.front(); qo.pop(); pq.push({Event::ODOM, m->timestamp, {}, m}); }
 
     
+    // 输出表头
+    std::cout << std::fixed << std::setprecision(6);
+    std::cout << "time,initialized,px,py,pz,vx,vy,vz,qw,qx,qy,qz\n";
+
+    std::string out_path = "eskf_result.txt";
+    std::ofstream fout(out_path);
+    if (!fout) {
+        std::cerr << "无法写入文件: " << out_path << "\n";
+        return 1;
+    }
+    fout << std::fixed << std::setprecision(9);
+    // 表头：时间 位姿 速度 四元数
+    fout << "t,px,py,pz,vx,vy,vz,qw,qx,qy,qz\n";
+
+    // 4) 驱动滤波
+    while (!pq.empty()) {
+        Event ev = pq.top(); pq.pop();
+        // push 下一条
+        if (ev.type == Event::IMU  && !qi.empty()) { auto m = qi.front(); qi.pop(); pq.push({Event::IMU,  m->timestamp, m, {}}); }
+        if (ev.type == Event::ODOM && !qo.empty()) { auto m = qo.front(); qo.pop(); pq.push({Event::ODOM, m->timestamp, {}, m}); }
+
+        if (ev.type == Event::IMU) {
+            auto m = ev.imu;
+            // IMU 原始量（注意：这里默认 IMU 数据在 IMU系 i）
+            Eigen::Vector3d w_i(m->gx, m->gy, m->gz);
+            Eigen::Vector3d a_i(m->ax, m->ay, m->az);
+            filter.predict(m->timestamp, w_i, a_i);
+        } else {
+            auto m = ev.odom;
+            // 轮速：使用 twist.linear.x 作为前向速度（与 wheel-x 对齐）
+            filter.updateWheel(m->timestamp, m->vx);
+        }
+
+        if (filter.initialized()) {
+            const auto& S = filter.state();
+            fout << S.t << ","
+                     << S.p.x() << "," << S.p.y() << "," << S.p.z() << ","
+                     << S.v.x() << "," << S.v.y() << "," << S.v.z() << ","
+                     << S.q.w() << "," << S.q.x() << "," << S.q.y() << "," << S.q.z()
+                     << "\n";
+        } else {
+            // 未初始化期间不输出pose，这里可打印监控行（可选）
+            // std::cout << ev.t << ",0,,,,,,,,,\n";
+        }
+    }
+
+    fout.close();
+
+    if (!filter.initialized()) {
+        std::cerr << "警告：未检测到足够长的静止段，未完成初始化。\n";
+    } else {
+        const auto& S = filter.state();
+        std::cout << "# Final p: " << S.p.transpose() << "\n";
+        std::cout << "# Final v: " << S.v.transpose() << "\n";
+    }
 
     return 0;
 }
