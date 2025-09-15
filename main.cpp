@@ -72,6 +72,24 @@ int main(int argc, char** argv) {
         std::cout << "Loaded " << query_images.size() << " query images" << std::endl;
         std::cout << "Target image ID: " << target_image.id << std::endl;
     }
+
+    using namespace bagio;
+
+    TxtDataLoader::Options options;
+    options.gnss_file = "../data/gnss_data.txt";
+    options.imu_file = "../data/bmi_imu_data.txt";
+    options.odom_file = "../data/odom_data.txt";
+
+    TxtDataLoader data_loader(options);
+    data_loader.load();
+
+    std::cout << "Loaded counts: imu=" << data_loader.imuCount()
+              << " odom=" << data_loader.odomCount()
+              << " gnss=" << data_loader.gnssCount() << "\n";
+    std::cout << "Time range: [" << std::to_string(data_loader.startTime())
+              << ", " << std::to_string(data_loader.endTime())  
+              << "]  duration=" << data_loader.duration() << " s\n";
+
     
 
     return 0;
