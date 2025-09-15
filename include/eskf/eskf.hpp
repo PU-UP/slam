@@ -55,7 +55,7 @@ struct Config {
     double gyro_noise   = 1.5e-3;   // rad/s/sqrt(Hz)
     double accel_noise  = 2.5e-1;   // m/s^2/sqrt(Hz)
     double gyro_rw      = 1.0e-5;   // rad/s^2/sqrt(Hz)
-    double accel_rw     = 1.0e-4;   // m/s^3/sqrt(Hz)
+    double accel_rw     = 1.0e-3;   // m/s^3/sqrt(Hz)
 
     // wheel speed obs
     double wheel_sigma  = 0.0001;     // m/s
@@ -135,7 +135,7 @@ public:
         // 2) rotate to wheel frame
         const Eigen::Vector3d w_wh = R_wi_ * w_i; // angular rate expressed in wheel frame
         Eigen::Vector3d a_wh = R_wi_ * a_i;       // specific force in wheel frame at IMU location
-        std::cout << "a_wh: " << a_wh.transpose() << std::endl;
+        // std::cout << "a_wh: " << a_wh.transpose() << std::endl;
 
         // Optional lever-arm compensation: transfer acceleration from IMU point to wheel origin
         if (cfg_.enable_lever_arm) {
@@ -152,18 +152,65 @@ public:
         // 3) propagate nominal state in world frame
         const Eigen::Matrix3d Rwwheel = state_.q.toRotationMatrix();
         const Eigen::Vector3d a_world = Rwwheel * a_wh + cfg_.g_world; // specific->accel
-        std::cout << "a_world: " << a_world.transpose() << std::endl;
-        std::cout << "--------------------------------" << std::endl;
+        // std::cout << "a_world: " << a_world.transpose() << std::endl;
+        // std::cout << "--------------------------------" << std::endl;
 
-        // state_.v += a_world * dt;
-        // state_.p += state_.v * dt + 0.5 * a_world * dt * dt;
+        state_.v += a_world * dt;
+        state_.p += state_.v * dt + 0.5 * a_world * dt * dt;
         state_.q  = RightUpdate(state_.q, w_wh * dt);
 
         // 4) covariance propagation
         propagateCov_(dt, a_wh, Rwwheel);
 
+        updateNHC();
+
         // try ZUPT if window satisfied
         tryTriggerInitOrZUPT_(t);
+    }
+
+
+    void updateNHC() {
+        if (!initialized_ || state_.v.norm() < 0.1) {
+            // 不要在静止或速度很低时使用此约束，以免与ZUPT冲突
+            return;
+        }
+
+        const Eigen::Matrix3d R_wheel_world = state_.q.conjugate().toRotationMatrix();
+        const Eigen::Vector3d v_in_wheel = R_wheel_world * state_.v;
+
+        // 观测模型 h = [v_y, v_z] in wheel frame
+        Eigen::Vector2d h;
+        h << v_in_wheel.y(), v_in_wheel.z();
+
+        // 测量值 z = [0, 0]
+        const Eigen::Vector2d y = -h; // y = z - h
+
+        // 构建雅可比矩阵 H (2x15)
+        Eigen::Matrix<double, 2, 15> H = Eigen::Matrix<double, 2, 15>::Zero();
+        
+        // H 对 dv 的偏导
+        H.block<1,3>(0,3) = Eigen::RowVector3d(0,1,0) * R_wheel_world;
+        H.block<1,3>(1,3) = Eigen::RowVector3d(0,0,1) * R_wheel_world;
+
+        // H 对 dtheta 的偏导
+        H.block<1,3>(0,6) = Eigen::RowVector3d(0,1,0) * Skew(v_in_wheel);
+        H.block<1,3>(1,6) = Eigen::RowVector3d(0,0,1) * Skew(v_in_wheel);
+
+        // 观测噪声 R
+        const double vel_noise = 0.05; // m/s, 可调参数
+        Eigen::Matrix2d R = Eigen::Matrix2d::Identity() * (vel_noise * vel_noise);
+
+        // 卡尔曼更新
+        const Eigen::Matrix<double, 2, 2> S = H * err_.P * H.transpose() + R;
+        const Eigen::Matrix<double, 15, 2> K = err_.P * H.transpose() * S.inverse();
+
+        err_.x += K * y;
+        // 使用 Joseph form 更新 P 以保证数值稳定性
+        Eigen::Matrix<double,15,15> I_KH = Eigen::Matrix<double,15,15>::Identity() - K*H;
+        err_.P = I_KH * err_.P * I_KH.transpose() + K * R * K.transpose();
+
+        // 注入并重置
+        injectAndReset_();
     }
 
     // ------------- wheel speed measurement (scalar, with timestamp) -------------
@@ -179,26 +226,16 @@ public:
         if (!initialized_) return 0.0;
 
         // measurement model: z = ex^T * R_wheel_world * v_w
-        const Eigen::Matrix3d R_wheel_world = state_.q.conjugate().toRotationMatrix(); // wheel<-world
-        const double h = (Eigen::RowVector3d(1,0,0) * R_wheel_world * state_.v)(0);
-        const double z = wheel_last_scaled_;
 
+        const Eigen::Matrix3d R_wheel_world = state_.q.conjugate().toRotationMatrix();
+        const Eigen::Vector3d v_in_wheel = R_wheel_world * state_.v;
+        const double h = v_in_wheel.x(); // (Eigen::RowVector3d(1,0,0) * v_in_wheel)(0)
+        const double z = wheel_last_scaled_;
         Eigen::Matrix<double,1,15> H; H.setZero();
         // dh/dv_w = ex^T * R_wheel_world
         H.block<1,3>(0,3) = Eigen::RowVector3d(1,0,0) * R_wheel_world;
-        // dh/dtheta via numeric diff (small, often negligible, but keep robustness)
-        const double eps = 1e-6;
-        for (int k=0;k<3;++k) {
-            Eigen::Vector3d d=Eigen::Vector3d::Zero(); d[k]=eps;
-            auto f = [&](const Eigen::Quaterniond& q)->double{
-                const Eigen::Matrix3d Rww = q.conjugate().toRotationMatrix();
-                return (Eigen::RowVector3d(1,0,0) * Rww * state_.v)(0);
-            };
-            const double hp = f(RightUpdate(state_.q, d));
-            const double hm = f(RightUpdate(state_.q,-d));
-            H(0,6+k) = (hp - hm)/(2.0*eps);
-        }
-
+        // dh/dtheta = ex^T * Skew(v_in_wheel)
+        H.block<1,3>(0,6) = Eigen::RowVector3d(1,0,0) * Skew(v_in_wheel);
         const double Rm = cfg_.wheel_sigma * cfg_.wheel_sigma;
         const double S  = (H * err_.P * H.transpose())(0,0) + Rm;
         const Eigen::Matrix<double,15,1> K = err_.P * H.transpose() * (1.0/S);
@@ -206,7 +243,7 @@ public:
         err_.x += K * y;
         err_.P  = (Eigen::Matrix<double,15,15>::Identity() - K*H) * err_.P;
         injectAndReset_();
-        return (h - z);
+        return y;
     }
 
     // compatibility (no timestamp): use current state time
@@ -227,7 +264,7 @@ private:
         F.block<3,3>(0,3)  = I3;                         // dp/dv
         F.block<3,3>(3,6)  = - Rwwheel * Skew(a_wh);     // dv/dtheta
         F.block<3,3>(3,12) = - Rwwheel * R_wi_;          // dv/dba_i  (a_wh = R_wi*(a_i - ba_i))
-        F.block<3,3>(6,9)  = - I3;                       // dtheta/dbg_i (w_wh = R_wi*(w_i - bg_i))
+        F.block<3,3>(6,9)  = - R_wi_;                       // dtheta/dbg_i (w_wh = R_wi*(w_i - bg_i))
 
         // noise in i-frame: [n_gi, n_ai, n_wg_i, n_wa_i]
         G.block<3,3>(6,0)   = - R_wi_;                   // dtheta/n_gi
@@ -253,13 +290,24 @@ private:
 
     // ---- inject ----
     void injectAndReset_() {
-        state_.p   += err_.x.block<3,1>(0,0);
-        state_.v   += err_.x.block<3,1>(3,0);
-        state_.q    = RightUpdate(state_.q, err_.x.block<3,1>(6,0));
-        state_.bg_i += err_.x.block<3,1>(9,0);
-        state_.ba_i += err_.x.block<3,1>(12,0);
+        // 1. 提取误差
+        const Eigen::Vector3d dp = err_.x.block<3,1>(0,0);
+        const Eigen::Vector3d dv = err_.x.block<3,1>(3,0);
+        const Eigen::Vector3d dtheta = err_.x.block<3,1>(6,0);
+        const Eigen::Vector3d dbg = err_.x.block<3,1>(9,0);
+        const Eigen::Vector3d dba = err_.x.block<3,1>(12,0);
+    
+        // 2. 注入名义状态
+        state_.p   += dp;
+        state_.v   += dv;
+        state_.q    = RightUpdate(state_.q, dtheta);
+        state_.bg_i += dbg;
+        state_.ba_i += dba;
+    
+        // 3. 重置误差状态向量
         err_.x.setZero();
     }
+    
 
     // ---- static initialization ----
     void doStaticInit_() {
@@ -344,9 +392,11 @@ private:
     }
 
     void updateWheelStatic_(double t, bool wheel_static) {
-        wheel_static_last_ = wheel_static; wheel_last_t_ = t;
-        const bool imu_fresh = (imu_last_t_ >= 0.0);
-        const bool both_static = wheel_static && imu_static_last_ && imu_fresh && ((t - wheel_last_t_) <= cfg_.wheel_stale_max);
+        wheel_static_last_ = wheel_static; 
+        wheel_last_t_ = t;
+    
+        const bool imu_fresh = (imu_last_t_ >= 0.0) && ((t - imu_last_t_) <= cfg_.wheel_stale_max);
+        const bool both_static = wheel_static && imu_static_last_ && imu_fresh;
         if (both_static) {
             if (static_win_start_t_ < 0) static_win_start_t_ = std::max(t, imu_last_t_);
             ++static_win_count_;
@@ -354,6 +404,7 @@ private:
             clearStaticWindow_();
         }
     }
+    
 
     void tryTriggerInitOrZUPT_(double now_t) {
         if (static_win_start_t_ < 0) return;
