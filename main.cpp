@@ -102,8 +102,8 @@ int main(int argc, char** argv) {
     cfg.g_world = Eigen::Vector3d(0,0,-9.81);
     cfg.wheel_scale = 1.0;
 
-    // 外参：T_wb（wheel<-body），示例设置（请替换为你的实际标定）
-    cfg.T_wb = Eigen::Isometry3d(calibration_data.extrinsic_body_T_wheel.transform.inverse());
+    // 外参：T_bi（body<-imu），示例设置（请替换为你的实际标定）
+    cfg.T_wheel_imu = Eigen::Isometry3d(calibration_data.extrinsic_body_T_wheel.transform.inverse());
     
     ESKF filter(cfg);
 
