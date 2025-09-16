@@ -6,6 +6,7 @@
 #include <limits>
 #include <cmath>
 #include <iostream>
+#include <yaml-cpp/yaml.h>
 
 /**
  * Error-State Kalman Filter for differential-drive robots.
@@ -100,6 +101,13 @@ struct FilterConfig {
 
     // Lever-arm compensation
     bool enable_lever_arm_compensation = false;
+    
+    /**
+     * Load FilterConfig from YAML configuration file.
+     * @param config_node YAML node containing ESKF configuration
+     * @return FilterConfig object with loaded parameters
+     */
+    static FilterConfig loadFromYaml(const YAML::Node& config_node);
 };
 
 /**
@@ -617,8 +625,14 @@ inline void ErrorStateKalmanFilter::updateImuStaticDetection_(double timestamp,
         zupt_acceleration_buffer_.push_back(accelerometer_raw);
         zupt_gyroscope_buffer_.push_back(gyroscope_raw);
     } else {
+        if (static_window_sample_count_ >= config_.zupt_minimum_samples / 4 * 3) {
+            std::cout << "Motion detected, both_sensors_static: " << static_window_sample_count_ << std::endl;
+            std::cout << "is_imu_static: " << is_imu_static 
+                      << " is_wheel_static: " << is_wheel_static_ 
+                      << " is_wheel_data_fresh: " << is_wheel_data_fresh << std::endl;
+        }
         clearStaticWindow_();
-    }
+    }                                                       
 
     if (is_imu_static) {
         if (initialization_start_time_ < 0) {
@@ -683,6 +697,69 @@ inline void ErrorStateKalmanFilter::clearStaticWindow_() {
     static_window_sample_count_ = 0;
     zupt_acceleration_buffer_.clear();
     zupt_gyroscope_buffer_.clear();
+}
+
+// ---------------- FilterConfig YAML Loading Implementation ----------------
+
+inline FilterConfig FilterConfig::loadFromYaml(const YAML::Node& config_node) {
+    FilterConfig config;
+    
+    try {
+        // Load gravity vector
+        if (config_node["gravity_world"]) {
+            const auto& gravity_node = config_node["gravity_world"];
+            config.gravity_world = Eigen::Vector3d(
+                gravity_node["x"].as<double>(0.0),
+                gravity_node["y"].as<double>(0.0),
+                gravity_node["z"].as<double>(-9.81)
+            );
+        }
+        
+        // Load IMU noise parameters
+        if (config_node["imu_noise"]) {
+            const auto& imu_noise = config_node["imu_noise"];
+            config.gyroscope_noise_density = imu_noise["gyroscope_noise_density"].as<double>(config.gyroscope_noise_density);
+            config.accelerometer_noise_density = imu_noise["accelerometer_noise_density"].as<double>(config.accelerometer_noise_density);
+            config.gyroscope_random_walk = imu_noise["gyroscope_random_walk"].as<double>(config.gyroscope_random_walk);
+            config.accelerometer_random_walk = imu_noise["accelerometer_random_walk"].as<double>(config.accelerometer_random_walk);
+        }
+        
+        // Load wheel speed parameters
+        if (config_node["wheel_speed"]) {
+            const auto& wheel_speed = config_node["wheel_speed"];
+            config.wheel_speed_noise_std = wheel_speed["noise_std"].as<double>(config.wheel_speed_noise_std);
+            config.wheel_speed_scale_factor = wheel_speed["scale_factor"].as<double>(config.wheel_speed_scale_factor);
+            config.wheel_data_timeout = wheel_speed["timeout"].as<double>(config.wheel_data_timeout);
+        }
+        
+        // Load ZUPT parameters
+        if (config_node["zupt"]) {
+            const auto& zupt = config_node["zupt"];
+            config.zupt_velocity_threshold = zupt["velocity_threshold"].as<double>(config.zupt_velocity_threshold);
+            config.zupt_gyroscope_threshold = zupt["gyroscope_threshold"].as<double>(config.zupt_gyroscope_threshold);
+            config.zupt_acceleration_threshold = zupt["acceleration_threshold"].as<double>(config.zupt_acceleration_threshold);
+            config.zupt_minimum_duration = zupt["minimum_duration"].as<double>(config.zupt_minimum_duration);
+            config.zupt_minimum_samples = zupt["minimum_samples"].as<size_t>(config.zupt_minimum_samples);
+            config.zupt_velocity_noise_std = zupt["velocity_noise_std"].as<double>(config.zupt_velocity_noise_std);
+            config.zupt_bias_nudging_factor = zupt["bias_nudging_factor"].as<double>(config.zupt_bias_nudging_factor);
+        }
+        
+        // Load non-holonomic constraint parameters
+        if (config_node["nhc"]) {
+            const auto& nhc = config_node["nhc"];
+            config.nhc_velocity_threshold = nhc["velocity_threshold"].as<double>(config.nhc_velocity_threshold);
+            config.nhc_lateral_noise_std = nhc["lateral_noise_std"].as<double>(config.nhc_lateral_noise_std);
+        }
+        
+        // Load lever-arm compensation setting
+        config.enable_lever_arm_compensation = config_node["enable_lever_arm_compensation"].as<bool>(config.enable_lever_arm_compensation);
+        
+    } catch (const YAML::Exception& e) {
+        std::cerr << "Error loading ESKF configuration: " << e.what() << std::endl;
+        std::cerr << "Using default configuration values." << std::endl;
+    }
+    
+    return config;
 }
 
 } // namespace eskf

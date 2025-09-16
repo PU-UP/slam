@@ -155,12 +155,24 @@ int main(int argc, char** argv) {
     auto qo = data_loader.odomQueue();
 
     using namespace eskf;
-    // 2) 配置 ESKF
+    // 2) 配置 ESKF - 从配置文件加载
     FilterConfig eskf_config;
-    eskf_config.gravity_world = Eigen::Vector3d(0,0,-9.81);
-    eskf_config.wheel_speed_scale_factor = 1.0;
+    
+    // 首先从配置文件加载ESKF参数
+    try {
+        YAML::Node main_config_file = YAML::LoadFile(config_path);
+        if (main_config_file["eskf"]) {
+            eskf_config = FilterConfig::loadFromYaml(main_config_file["eskf"]);
+            std::cout << "ESKF配置已从配置文件加载" << std::endl;
+        } else {
+            std::cout << "未找到ESKF配置，使用默认参数" << std::endl;
+        }
+    } catch (const YAML::Exception& e) {
+        std::cerr << "加载ESKF配置时出错: " << e.what() << std::endl;
+        std::cout << "使用默认ESKF配置" << std::endl;
+    }
 
-    // 外参：T_bi（body<-imu），示例设置（请替换为你的实际标定）
+    // 外参：T_bi（body<-imu），从标定数据设置
     eskf_config.transform_wheel_T_imu = Eigen::Isometry3d(calibration_data.extrinsic_body_T_wheel.transform.inverse());
     
     ErrorStateKalmanFilter filter(eskf_config);

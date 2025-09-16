@@ -19,3 +19,42 @@ debug:
 paths:
   calibration_config: "../data/calibration_config.yaml"
   output_prefix: "slam_"
+
+# ESKF (Error-State Kalman Filter) Configuration
+eskf:
+  # Gravity vector in world frame (ENU convention)
+  gravity_world:
+    x: 0.0
+    y: 0.0
+    z: -9.81
+  
+  # IMU noise parameters (square root of power spectral density)
+  imu_noise:
+    gyroscope_noise_density: 1.5e-3     # rad/s/√Hz
+    accelerometer_noise_density: 2.5e-1  # m/s²/√Hz
+    gyroscope_random_walk: 1.0e-5        # rad/s²/√Hz
+    accelerometer_random_walk: 1.0e-3    # m/s³/√Hz
+  
+  # Wheel speed measurement parameters
+  wheel_speed:
+    noise_std: 0.0001                    # m/s
+    scale_factor: 1.0                    # dimensionless
+    timeout: 0.5                         # seconds
+  
+  # Zero-velocity update (ZUPT) detection parameters
+  zupt:
+    velocity_threshold: 0.01             # m/s
+    gyroscope_threshold: 0.02            # rad/s
+    acceleration_threshold: 0.06         # m/s²
+    minimum_duration: 1.5                # seconds
+    minimum_samples: 50                  # samples
+    velocity_noise_std: 0.005            # m/s
+    bias_nudging_factor: 0.001           # dimensionless
+  
+  # Non-holonomic constraint parameters
+  nhc:
+    velocity_threshold: 0.0005           # m/s
+    lateral_noise_std: 0.0001            # m/s
+  
+  # Lever-arm compensation
+  enable_lever_arm_compensation: false
