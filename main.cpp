@@ -98,14 +98,14 @@ int main(int argc, char** argv) {
 
     using namespace eskf;
     // 2) 配置 ESKF
-    Config cfg;
-    cfg.g_world = Eigen::Vector3d(0,0,-9.81);
-    cfg.wheel_scale = 1.0;
+    FilterConfig eskf_config;
+    eskf_config.gravity_world = Eigen::Vector3d(0,0,-9.81);
+    eskf_config.wheel_speed_scale_factor = 1.0;
 
     // 外参：T_bi（body<-imu），示例设置（请替换为你的实际标定）
-    cfg.T_wheel_imu = Eigen::Isometry3d(calibration_data.extrinsic_body_T_wheel.transform.inverse());
+    eskf_config.transform_wheel_to_imu = Eigen::Isometry3d(calibration_data.extrinsic_body_T_wheel.transform.inverse());
     
-    ESKF filter(cfg);
+    ErrorStateKalmanFilter filter(eskf_config);
 
     std::priority_queue<Event, std::vector<Event>, CmpEvent> pq;
     if (!qi.empty()) { auto m = qi.front(); qi.pop(); pq.push({Event::IMU,  m->timestamp, m, {}}); }
@@ -127,8 +127,17 @@ int main(int argc, char** argv) {
     fout << "t,px,py,pz,vx,vy,vz,qw,qx,qy,qz\n";
 
     // 4) 驱动滤波
+    double last_progress_time = 0.0;
+    double progress_interval = 1.0; // 每1秒打印一次进度
+    int processed_count = 0;
+    int total_events = qi.size() + qo.size();
+    
+    std::cout << "开始处理数据，总共 " << total_events << " 个事件..." << std::endl;
+    
     while (!pq.empty()) {
         Event ev = pq.top(); pq.pop();
+        processed_count++;
+        
         // push 下一条
         if (ev.type == Event::IMU  && !qi.empty()) { auto m = qi.front(); qi.pop(); pq.push({Event::IMU,  m->timestamp, m, {}}); }
         if (ev.type == Event::ODOM && !qo.empty()) { auto m = qo.front(); qo.pop(); pq.push({Event::ODOM, m->timestamp, {}, m}); }
@@ -136,21 +145,40 @@ int main(int argc, char** argv) {
         if (ev.type == Event::IMU) {
             auto m = ev.imu;
             // IMU 原始量（注意：这里默认 IMU 数据在 IMU系 i）
-            Eigen::Vector3d w_i(m->gx, m->gy, m->gz);
-            Eigen::Vector3d a_i(m->ax, m->ay, m->az);
-            filter.predict(m->timestamp, w_i, a_i);
+            Eigen::Vector3d gyroscope_raw(m->gx, m->gy, m->gz);
+            Eigen::Vector3d accelerometer_raw(m->ax, m->ay, m->az);
+            filter.predictIMU(m->timestamp, gyroscope_raw, accelerometer_raw);
         } else {
             auto m = ev.odom;
             // 轮速：使用 twist.linear.x 作为前向速度（与 wheel-x 对齐）
-            filter.updateWheel(m->timestamp, m->vx);
+            filter.updateWheelSpeed(m->timestamp, m->vx);
         }
 
-        if (filter.initialized()) {
-            const auto& S = filter.state();
-            fout << S.t << ","
-                     << S.p.x() << "," << S.p.y() << "," << S.p.z() << ","
-                     << S.v.x() << "," << S.v.y() << "," << S.v.z() << ","
-                     << S.q.w() << "," << S.q.x() << "," << S.q.y() << "," << S.q.z()
+        // 定期打印进度和当前状态
+        if (ev.t - last_progress_time >= progress_interval) {
+            double progress_percent = (double)processed_count / total_events * 100.0;
+            std::cout << "进度: " << std::fixed << std::setprecision(1) << progress_percent 
+                      << "% (" << processed_count << "/" << total_events << ")";
+            
+            if (filter.isInitialized()) {
+                const auto& S = filter.getNominalState();
+                std::cout << " | 位置: [" << std::setprecision(3) 
+                          << S.position.x() << ", " << S.position.y() << ", " << S.position.z() << "]"
+                          << " | 速度: [" << std::setprecision(3)
+                          << S.velocity.x() << ", " << S.velocity.y() << ", " << S.velocity.z() << "]";
+            } else {
+                std::cout << " | 状态: 未初始化";
+            }
+            std::cout << std::endl;
+            last_progress_time = ev.t;
+        }
+
+        if (filter.isInitialized()) {
+            const auto& S = filter.getNominalState();
+            fout << S.timestamp << ","
+                     << S.position.x() << "," << S.position.y() << "," << S.position.z() << ","
+                     << S.velocity.x() << "," << S.velocity.y() << "," << S.velocity.z() << ","
+                     << S.orientation.w() << "," << S.orientation.x() << "," << S.orientation.y() << "," << S.orientation.z()
                      << "\n";
         } else {
             // 未初始化期间不输出pose，这里可打印监控行（可选）
@@ -160,12 +188,12 @@ int main(int argc, char** argv) {
 
     fout.close();
 
-    if (!filter.initialized()) {
+    if (!filter.isInitialized()) {
         std::cerr << "警告：未检测到足够长的静止段，未完成初始化。\n";
     } else {
-        const auto& S = filter.state();
-        std::cout << "# Final p: " << S.p.transpose() << "\n";
-        std::cout << "# Final v: " << S.v.transpose() << "\n";
+        const auto& S = filter.getNominalState();
+        std::cout << "# Final p: " << S.position.transpose() << "\n";
+        std::cout << "# Final v: " << S.velocity.transpose() << "\n";
     }
 
     return 0;
