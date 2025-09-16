@@ -161,7 +161,7 @@ int main(int argc, char** argv) {
     eskf_config.wheel_speed_scale_factor = 1.0;
 
     // 外参：T_bi（body<-imu），示例设置（请替换为你的实际标定）
-    eskf_config.transform_wheel_to_imu = Eigen::Isometry3d(calibration_data.extrinsic_body_T_wheel.transform.inverse());
+    eskf_config.transform_wheel_T_imu = Eigen::Isometry3d(calibration_data.extrinsic_body_T_wheel.transform.inverse());
     
     ErrorStateKalmanFilter filter(eskf_config);
 

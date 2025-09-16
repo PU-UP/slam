@@ -18,6 +18,8 @@
  *  - Wheel: Vehicle frame located at differential drive center
  *  - IMU (i): Sensor frame at arbitrary location on the robot
  * 
+ *  frameA_T_frameB: from frameB to frameA !!!!!
+ * 
  * State Vector (15-dimensional):
  *  - Position: p_w (3D, world frame)
  *  - Velocity: v_w (3D, world frame) 
@@ -80,7 +82,7 @@ struct FilterConfig {
     double wheel_speed_scale_factor = 1.0;      // dimensionless
 
     // Extrinsic calibration: wheel frame <- IMU frame
-    Eigen::Isometry3d transform_wheel_to_imu = Eigen::Isometry3d::Identity();
+    Eigen::Isometry3d transform_wheel_T_imu = Eigen::Isometry3d::Identity();
 
     // Zero-velocity update (ZUPT) detection parameters
     double zupt_velocity_threshold = 0.03;      // m/s
@@ -181,7 +183,7 @@ private:
     // Covariance propagation
     void propagateCovariance_(double time_step,
                               const Eigen::Vector3d& acceleration_wheel,
-                              const Eigen::Matrix3d& rotation_world_to_wheel);
+                              const Eigen::Matrix3d& rotation_world_T_wheel);
     
     // Error state injection and reset
     void injectAndResetErrorState_();
@@ -215,8 +217,8 @@ private:
     bool is_waiting_for_init_ = true;
     
     // Extrinsic transformation cache
-    Eigen::Matrix3d rotation_wheel_to_imu_;
-    Eigen::Matrix3d rotation_imu_to_wheel_;
+    Eigen::Matrix3d rotation_wheel_T_imu_;
+    Eigen::Matrix3d rotation_imu_T_wheel_;
     Eigen::Vector3d translation_imu_in_wheel_;
     
     // Angular velocity cache (wheel frame)
@@ -244,9 +246,9 @@ private:
   // ---------------- Implementation ----------------
 
 inline ErrorStateKalmanFilter::ErrorStateKalmanFilter(const FilterConfig& config) : config_(config) {
-    rotation_wheel_to_imu_ = config_.transform_wheel_to_imu.linear();
-    rotation_imu_to_wheel_ = rotation_wheel_to_imu_.transpose();
-    translation_imu_in_wheel_ = config_.transform_wheel_to_imu.translation();
+    rotation_wheel_T_imu_ = config_.transform_wheel_T_imu.linear();
+    rotation_imu_T_wheel_ = rotation_wheel_T_imu_.transpose();
+    translation_imu_in_wheel_ = config_.transform_wheel_T_imu.translation();
 }
 
 inline void ErrorStateKalmanFilter::initializeState(const NominalState& initial_state, 
@@ -281,9 +283,9 @@ inline void ErrorStateKalmanFilter::setWheelSpeedScaleFactor(double scale_factor
 }
 
 inline void ErrorStateKalmanFilter::setWheelToImuTransform(const Eigen::Isometry3d& transform) {
-    config_.transform_wheel_to_imu = transform;
-    rotation_wheel_to_imu_ = transform.linear();
-    rotation_imu_to_wheel_ = rotation_wheel_to_imu_.transpose();
+    config_.transform_wheel_T_imu = transform;
+    rotation_wheel_T_imu_ = transform.linear();
+    rotation_imu_T_wheel_ = rotation_wheel_T_imu_.transpose();
     translation_imu_in_wheel_ = transform.translation();
 }
 
@@ -307,8 +309,8 @@ inline void ErrorStateKalmanFilter::predictIMU(double timestamp,
     const Eigen::Vector3d accelerometer_corrected = accelerometer_raw - nominal_state_.accelerometer_bias;
 
     // Transform measurements to wheel frame
-    const Eigen::Vector3d angular_velocity_wheel = rotation_wheel_to_imu_ * gyroscope_corrected;
-    Eigen::Vector3d acceleration_wheel = rotation_wheel_to_imu_ * accelerometer_corrected;
+    const Eigen::Vector3d angular_velocity_wheel = rotation_wheel_T_imu_ * gyroscope_corrected;
+    Eigen::Vector3d acceleration_wheel = rotation_wheel_T_imu_ * accelerometer_corrected;
 
     // Optional lever-arm compensation
     if (config_.enable_lever_arm_compensation && has_previous_angular_velocity_) {
@@ -325,16 +327,16 @@ inline void ErrorStateKalmanFilter::predictIMU(double timestamp,
     has_previous_angular_velocity_ = true;
 
     // Propagate nominal state
-    const Eigen::Matrix3d rotation_world_to_wheel = nominal_state_.orientation.toRotationMatrix();
+    const Eigen::Matrix3d rotation_world_T_wheel = nominal_state_.orientation.toRotationMatrix();
     const Eigen::Vector3d acceleration_world = 
-        rotation_world_to_wheel * acceleration_wheel + config_.gravity_world;
+        rotation_world_T_wheel * acceleration_wheel + config_.gravity_world;
 
-    nominal_state_.velocity += acceleration_world * dt;
     nominal_state_.position += nominal_state_.velocity * dt + 0.5 * acceleration_world * dt * dt;
+    nominal_state_.velocity += acceleration_world * dt;
     nominal_state_.orientation = quaternionRightUpdate(nominal_state_.orientation, angular_velocity_wheel * dt);
 
     // Propagate error covariance
-    propagateCovariance_(dt, acceleration_wheel, rotation_world_to_wheel);
+    propagateCovariance_(dt, acceleration_wheel, rotation_world_T_wheel);
 
     // Apply non-holonomic constraints
     applyNonHolonomicConstraints_();
@@ -352,8 +354,8 @@ inline double ErrorStateKalmanFilter::updateWheelSpeed(double timestamp, double 
     if (!is_initialized_) return 0.0;
 
     // Measurement model: forward velocity in wheel frame
-    const Eigen::Matrix3d rotation_wheel_to_world = nominal_state_.orientation.conjugate().toRotationMatrix();
-    const Eigen::Vector3d velocity_in_wheel_frame = rotation_wheel_to_world * nominal_state_.velocity;
+    const Eigen::Matrix3d rotation_wheel_T_world = nominal_state_.orientation.conjugate().toRotationMatrix();
+    const Eigen::Vector3d velocity_in_wheel_frame = rotation_wheel_T_world * nominal_state_.velocity;
     const double predicted_forward_velocity = velocity_in_wheel_frame.x();
 
     // Jacobian of measurement with respect to error state
@@ -361,7 +363,7 @@ inline double ErrorStateKalmanFilter::updateWheelSpeed(double timestamp, double 
         Eigen::Matrix<double, 1, ErrorState::STATE_DIMENSION>::Zero();
     
     // Derivative with respect to velocity error
-    measurement_jacobian.block<1, 3>(0, 3) = Eigen::RowVector3d(1, 0, 0) * rotation_wheel_to_world;
+    measurement_jacobian.block<1, 3>(0, 3) = Eigen::RowVector3d(1, 0, 0) * rotation_wheel_T_world;
     
     // Derivative with respect to orientation error
     measurement_jacobian.block<1, 3>(0, 6) = Eigen::RowVector3d(1, 0, 0) * skewSymmetric(velocity_in_wheel_frame);
@@ -396,7 +398,7 @@ inline void ErrorStateKalmanFilter::updateGPS(const GpsMeasurement& gps_measurem
 
 inline void ErrorStateKalmanFilter::propagateCovariance_(double time_step,
                                                           const Eigen::Vector3d& acceleration_wheel,
-                                                          const Eigen::Matrix3d& rotation_world_to_wheel) {
+                                                          const Eigen::Matrix3d& rotation_world_T_wheel) {
     Eigen::Matrix<double, ErrorState::STATE_DIMENSION, ErrorState::STATE_DIMENSION> state_transition_matrix = 
         Eigen::Matrix<double, ErrorState::STATE_DIMENSION, ErrorState::STATE_DIMENSION>::Zero();
     Eigen::Matrix<double, ErrorState::STATE_DIMENSION, 12> noise_jacobian = 
@@ -405,13 +407,13 @@ inline void ErrorStateKalmanFilter::propagateCovariance_(double time_step,
 
     // State transition matrix
     state_transition_matrix.block<3, 3>(0, 3) = identity3;  // position/velocity coupling
-    state_transition_matrix.block<3, 3>(3, 6) = -rotation_world_to_wheel * skewSymmetric(acceleration_wheel);
-    state_transition_matrix.block<3, 3>(3, 12) = -rotation_world_to_wheel * rotation_wheel_to_imu_;
-    state_transition_matrix.block<3, 3>(6, 9) = -rotation_wheel_to_imu_;
+    state_transition_matrix.block<3, 3>(3, 6) = -rotation_world_T_wheel * skewSymmetric(acceleration_wheel);
+    state_transition_matrix.block<3, 3>(3, 12) = -rotation_world_T_wheel * rotation_wheel_T_imu_;
+    state_transition_matrix.block<3, 3>(6, 9) = -rotation_wheel_T_imu_;
 
     // Noise jacobian (IMU noise in IMU frame)
-    noise_jacobian.block<3, 3>(6, 0) = -rotation_wheel_to_imu_;
-    noise_jacobian.block<3, 3>(3, 3) = -rotation_world_to_wheel * rotation_wheel_to_imu_;
+    noise_jacobian.block<3, 3>(6, 0) = -rotation_wheel_T_imu_;
+    noise_jacobian.block<3, 3>(3, 3) = -rotation_world_T_wheel * rotation_wheel_T_imu_;
     noise_jacobian.block<3, 3>(9, 6) = identity3;
     noise_jacobian.block<3, 3>(12, 9) = identity3;
 
@@ -478,16 +480,16 @@ inline void ErrorStateKalmanFilter::performStaticInitialization_() {
     // Align gravity vector to estimate initial orientation
     const Eigen::Vector3d gravity_world_normalized = config_.gravity_world.normalized();
     const Eigen::Vector3d negative_acceleration_normalized = (-acceleration_mean).normalized();
-    const Eigen::Quaterniond orientation_imu_to_world = 
+    const Eigen::Quaterniond orientation_imu_T_world = 
         Eigen::Quaterniond::FromTwoVectors(negative_acceleration_normalized, gravity_world_normalized);
-    const Eigen::Matrix3d rotation_world_to_imu = orientation_imu_to_world.toRotationMatrix().transpose();
+    const Eigen::Matrix3d rotation_world_T_imu = orientation_imu_T_world.toRotationMatrix().transpose();
 
     // Estimate accelerometer bias
-    nominal_state_.accelerometer_bias = acceleration_mean + rotation_world_to_imu * config_.gravity_world;
+    nominal_state_.accelerometer_bias = acceleration_mean + rotation_world_T_imu * config_.gravity_world;
 
     // Compute initial wheel frame orientation
-    const Eigen::Matrix3d rotation_world_to_wheel = orientation_imu_to_world.toRotationMatrix() * rotation_imu_to_wheel_;
-    nominal_state_.orientation = Eigen::Quaterniond(rotation_world_to_wheel).normalized();
+    const Eigen::Matrix3d rotation_world_T_wheel = orientation_imu_T_world.toRotationMatrix() * rotation_imu_T_wheel_;
+    nominal_state_.orientation = Eigen::Quaterniond(rotation_world_T_wheel).normalized();
     nominal_state_.velocity.setZero();
     nominal_state_.timestamp = (initialization_start_time_ < 0) ? 0.0 : initialization_start_time_;
     
@@ -538,10 +540,10 @@ inline void ErrorStateKalmanFilter::nudgeBiasesDuringStaticPeriod_() {
     
     const Eigen::Vector3d gravity_world_normalized = config_.gravity_world.normalized();
     const Eigen::Vector3d negative_acceleration_normalized = (-acceleration_mean).normalized();
-    const Eigen::Quaterniond orientation_imu_to_world = 
+    const Eigen::Quaterniond orientation_imu_T_world = 
         Eigen::Quaterniond::FromTwoVectors(negative_acceleration_normalized, gravity_world_normalized);
-    const Eigen::Matrix3d rotation_world_to_imu = orientation_imu_to_world.toRotationMatrix().transpose();
-    const Eigen::Vector3d accelerometer_bias_estimate = acceleration_mean + rotation_world_to_imu * config_.gravity_world;
+    const Eigen::Matrix3d rotation_world_T_imu = orientation_imu_T_world.toRotationMatrix().transpose();
+    const Eigen::Vector3d accelerometer_bias_estimate = acceleration_mean + rotation_world_T_imu * config_.gravity_world;
     
     nominal_state_.accelerometer_bias = (1.0 - alpha) * nominal_state_.accelerometer_bias + alpha * accelerometer_bias_estimate;
 }
@@ -551,8 +553,8 @@ inline void ErrorStateKalmanFilter::applyNonHolonomicConstraints_() {
         return;
     }
 
-    const Eigen::Matrix3d rotation_wheel_to_world = nominal_state_.orientation.conjugate().toRotationMatrix();
-    const Eigen::Vector3d velocity_in_wheel_frame = rotation_wheel_to_world * nominal_state_.velocity;
+    const Eigen::Matrix3d rotation_wheel_T_world = nominal_state_.orientation.conjugate().toRotationMatrix();
+    const Eigen::Vector3d velocity_in_wheel_frame = rotation_wheel_T_world * nominal_state_.velocity;
 
     // Measurement model: lateral and vertical velocities should be zero
     Eigen::Vector2d predicted_lateral_velocities;
@@ -563,8 +565,8 @@ inline void ErrorStateKalmanFilter::applyNonHolonomicConstraints_() {
     Eigen::Matrix<double, 2, ErrorState::STATE_DIMENSION> measurement_jacobian = 
         Eigen::Matrix<double, 2, ErrorState::STATE_DIMENSION>::Zero();
     
-    measurement_jacobian.block<1, 3>(0, 3) = Eigen::RowVector3d(0, 1, 0) * rotation_wheel_to_world;
-    measurement_jacobian.block<1, 3>(1, 3) = Eigen::RowVector3d(0, 0, 1) * rotation_wheel_to_world;
+    measurement_jacobian.block<1, 3>(0, 3) = Eigen::RowVector3d(0, 1, 0) * rotation_wheel_T_world;
+    measurement_jacobian.block<1, 3>(1, 3) = Eigen::RowVector3d(0, 0, 1) * rotation_wheel_T_world;
     measurement_jacobian.block<1, 3>(0, 6) = Eigen::RowVector3d(0, 1, 0) * skewSymmetric(velocity_in_wheel_frame);
     measurement_jacobian.block<1, 3>(1, 6) = Eigen::RowVector3d(0, 0, 1) * skewSymmetric(velocity_in_wheel_frame);
 
