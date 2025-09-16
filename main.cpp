@@ -8,10 +8,68 @@
 #include <limits>
 #include <iostream>
 #include <iomanip>
+#include <thread>
+#include <atomic>
+#include <termios.h>
+#include <unistd.h>
+#include <fcntl.h>
 #include "data_prepare.hpp"
 #include "include/slam/modules.hpp"
 
 #include "eskf/eskf.hpp"
+
+// 全局控制变量
+std::atomic<bool> is_paused(false);
+std::atomic<bool> should_exit(false);
+
+// 键盘输入处理函数
+void keyboardInputHandler() {
+    // 设置终端为非阻塞模式
+    struct termios oldt, newt;
+    tcgetattr(STDIN_FILENO, &oldt);
+    newt = oldt;
+    newt.c_lflag &= ~(ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+    fcntl(STDIN_FILENO, F_SETFL, O_NONBLOCK);
+    
+    char c;
+    while (!should_exit.load()) {
+        if (read(STDIN_FILENO, &c, 1) > 0) {
+            switch (c) {
+                case 'p':
+                case 'P':
+                    is_paused.store(!is_paused.load());
+                    if (is_paused.load()) {
+                        std::cout << "\n[暂停] 按 'p' 继续，按 'q' 退出" << std::endl;
+                    } else {
+                        std::cout << "\n[继续] 按 'p' 暂停，按 'q' 退出" << std::endl;
+                    }
+                    break;
+                case 'q':
+                case 'Q':
+                    should_exit.store(true);
+                    std::cout << "\n[退出] 正在安全退出..." << std::endl;
+                    break;
+                case 's':
+                case 'S':
+                    std::cout << "\n[状态] 当前状态: " << (is_paused.load() ? "暂停" : "运行") << std::endl;
+                    break;
+                case 'h':
+                case 'H':
+                    std::cout << "\n[帮助] 按键说明:" << std::endl;
+                    std::cout << "  p/P - 暂停/继续" << std::endl;
+                    std::cout << "  q/Q - 退出程序" << std::endl;
+                    std::cout << "  s/S - 显示状态" << std::endl;
+                    std::cout << "  h/H - 显示帮助" << std::endl;
+                    break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    
+    // 恢复终端设置
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+}
 
 // Configuration file path finder
 inline std::string GetMainConfigPath() {
@@ -129,8 +187,22 @@ int main(int argc, char** argv) {
     int total_events = qi.size() + qo.size();
     
     std::cout << "开始处理数据，总共 " << total_events << " 个事件（传感器数据）..." << std::endl;
+    std::cout << "按键控制: p-暂停/继续, q-退出, s-状态, h-帮助" << std::endl;
     
-    while (!pq.empty()) {
+    // 启动键盘输入处理线程
+    std::thread keyboard_thread(keyboardInputHandler);
+    keyboard_thread.detach();
+    
+    while (!pq.empty() && !should_exit.load()) {
+        // 检查暂停状态
+        while (is_paused.load() && !should_exit.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        
+        // 如果用户要求退出，跳出循环
+        if (should_exit.load()) {
+            break;
+        }
         Event ev = pq.top(); pq.pop();
         processed_count++;
         
@@ -165,6 +237,12 @@ int main(int argc, char** argv) {
             } else {
                 std::cout << " | 状态: 未初始化";
             }
+            
+            // 显示暂停状态
+            if (is_paused.load()) {
+                std::cout << " | [暂停中]";
+            }
+            
             std::cout << std::endl;
             last_progress_time = ev.t;
         }
@@ -184,6 +262,17 @@ int main(int argc, char** argv) {
 
     fout.close();
 
+    // 设置退出标志，等待键盘线程结束
+    should_exit.store(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // 输出最终状态
+    if (should_exit.load()) {
+        std::cout << "\n程序被用户中断，已处理 " << processed_count << " 个事件" << std::endl;
+    } else {
+        std::cout << "\n数据处理完成，共处理 " << processed_count << " 个事件" << std::endl;
+    }
+
     if (!filter.isInitialized()) {
         std::cerr << "警告：未检测到足够长的静止段，未完成初始化。\n";
     } else {
@@ -192,5 +281,6 @@ int main(int argc, char** argv) {
         std::cout << "# Final v: " << S.velocity.transpose() << "\n";
     }
 
+    std::cout << "结果已保存到: " << out_path << std::endl;
     return 0;
 }
