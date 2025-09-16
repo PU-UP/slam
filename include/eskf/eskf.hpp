@@ -21,7 +21,7 @@
  * State Vector (15-dimensional):
  *  - Position: p_w (3D, world frame)
  *  - Velocity: v_w (3D, world frame) 
- *  - Attitude: q_wheel (quaternion, world->wheel transformation)
+ *  - Orientation: q_wheel (quaternion, world->wheel transformation)
  *  - Gyroscope bias: bg_i (3D, IMU frame)
  *  - Accelerometer bias: ba_i (3D, IMU frame)
  * 
@@ -363,7 +363,7 @@ inline double ErrorStateKalmanFilter::updateWheelSpeed(double timestamp, double 
     // Derivative with respect to velocity error
     measurement_jacobian.block<1, 3>(0, 3) = Eigen::RowVector3d(1, 0, 0) * rotation_wheel_to_world;
     
-    // Derivative with respect to attitude error
+    // Derivative with respect to orientation error
     measurement_jacobian.block<1, 3>(0, 6) = Eigen::RowVector3d(1, 0, 0) * skewSymmetric(velocity_in_wheel_frame);
 
     // Kalman filter update
@@ -387,6 +387,7 @@ inline double ErrorStateKalmanFilter::updateWheelSpeed(double wheel_speed_raw) {
 }
 
 inline void ErrorStateKalmanFilter::updateGPS(const GpsMeasurement& gps_measurement) {
+    std::cout << "GPS update is not yet implemented, gps_measurement: " << gps_measurement.position_world.transpose();
     // TODO: Implement GPS update
     // This would involve a position measurement update with the GPS position and covariance
 }
@@ -441,14 +442,14 @@ inline void ErrorStateKalmanFilter::injectAndResetErrorState_() {
     // Extract error state components
     const Eigen::Vector3d position_error = error_state_.vector.block<3, 1>(0, 0);
     const Eigen::Vector3d velocity_error = error_state_.vector.block<3, 1>(3, 0);
-    const Eigen::Vector3d attitude_error = error_state_.vector.block<3, 1>(6, 0);
+    const Eigen::Vector3d orientation_error = error_state_.vector.block<3, 1>(6, 0);
     const Eigen::Vector3d gyroscope_bias_error = error_state_.vector.block<3, 1>(9, 0);
     const Eigen::Vector3d accelerometer_bias_error = error_state_.vector.block<3, 1>(12, 0);
 
     // Inject errors into nominal state
     nominal_state_.position += position_error;
     nominal_state_.velocity += velocity_error;
-    nominal_state_.orientation = quaternionRightUpdate(nominal_state_.orientation, attitude_error);
+    nominal_state_.orientation = quaternionRightUpdate(nominal_state_.orientation, orientation_error);
     nominal_state_.gyroscope_bias += gyroscope_bias_error;
     nominal_state_.accelerometer_bias += accelerometer_bias_error;
 
@@ -474,18 +475,18 @@ inline void ErrorStateKalmanFilter::performStaticInitialization_() {
     // Estimate gyroscope bias
     nominal_state_.gyroscope_bias = gyroscope_mean;
 
-    // Align gravity vector to estimate initial attitude
+    // Align gravity vector to estimate initial orientation
     const Eigen::Vector3d gravity_world_normalized = config_.gravity_world.normalized();
     const Eigen::Vector3d negative_acceleration_normalized = (-acceleration_mean).normalized();
-    const Eigen::Quaterniond attitude_imu_to_world = 
+    const Eigen::Quaterniond orientation_imu_to_world = 
         Eigen::Quaterniond::FromTwoVectors(negative_acceleration_normalized, gravity_world_normalized);
-    const Eigen::Matrix3d rotation_world_to_imu = attitude_imu_to_world.toRotationMatrix().transpose();
+    const Eigen::Matrix3d rotation_world_to_imu = orientation_imu_to_world.toRotationMatrix().transpose();
 
     // Estimate accelerometer bias
     nominal_state_.accelerometer_bias = acceleration_mean + rotation_world_to_imu * config_.gravity_world;
 
-    // Compute initial wheel frame attitude
-    const Eigen::Matrix3d rotation_world_to_wheel = attitude_imu_to_world.toRotationMatrix() * rotation_imu_to_wheel_;
+    // Compute initial wheel frame orientation
+    const Eigen::Matrix3d rotation_world_to_wheel = orientation_imu_to_world.toRotationMatrix() * rotation_imu_to_wheel_;
     nominal_state_.orientation = Eigen::Quaterniond(rotation_world_to_wheel).normalized();
     nominal_state_.velocity.setZero();
     nominal_state_.timestamp = (initialization_start_time_ < 0) ? 0.0 : initialization_start_time_;
@@ -537,9 +538,9 @@ inline void ErrorStateKalmanFilter::nudgeBiasesDuringStaticPeriod_() {
     
     const Eigen::Vector3d gravity_world_normalized = config_.gravity_world.normalized();
     const Eigen::Vector3d negative_acceleration_normalized = (-acceleration_mean).normalized();
-    const Eigen::Quaterniond attitude_imu_to_world = 
+    const Eigen::Quaterniond orientation_imu_to_world = 
         Eigen::Quaterniond::FromTwoVectors(negative_acceleration_normalized, gravity_world_normalized);
-    const Eigen::Matrix3d rotation_world_to_imu = attitude_imu_to_world.toRotationMatrix().transpose();
+    const Eigen::Matrix3d rotation_world_to_imu = orientation_imu_to_world.toRotationMatrix().transpose();
     const Eigen::Vector3d accelerometer_bias_estimate = acceleration_mean + rotation_world_to_imu * config_.gravity_world;
     
     nominal_state_.accelerometer_bias = (1.0 - alpha) * nominal_state_.accelerometer_bias + alpha * accelerometer_bias_estimate;

@@ -66,15 +66,15 @@ int main(int argc, char** argv) {
     }
     
     // Load image data
-    RawImageData target_image;
-    std::vector<RawImageData> query_images;
-    LoadRawImageData(config.target_image_id, config.query_image_start_id, 
-                     config.query_image_length, target_image, query_images);
+    // RawImageData target_image;
+    // std::vector<RawImageData> query_images;
+    // LoadRawImageData(config.target_image_id, config.query_image_start_id, 
+    //                  config.query_image_length, target_image, query_images);
     
-    if (config.enable_debug) {
-        std::cout << "Loaded " << query_images.size() << " query images" << std::endl;
-        std::cout << "Target image ID: " << target_image.id << std::endl;
-    }
+    // if (config.enable_debug) {
+    //     std::cout << "Loaded " << query_images.size() << " query images" << std::endl;
+    //     std::cout << "Target image ID: " << target_image.id << std::endl;
+    // }
 
     using namespace bagio;
 
@@ -112,10 +112,6 @@ int main(int argc, char** argv) {
     if (!qo.empty()) { auto m = qo.front(); qo.pop(); pq.push({Event::ODOM, m->timestamp, {}, m}); }
 
     
-    // 输出表头
-    std::cout << std::fixed << std::setprecision(6);
-    std::cout << "time,initialized,px,py,pz,vx,vy,vz,qw,qx,qy,qz\n";
-
     std::string out_path = "eskf_result.txt";
     std::ofstream fout(out_path);
     if (!fout) {
@@ -132,7 +128,7 @@ int main(int argc, char** argv) {
     int processed_count = 0;
     int total_events = qi.size() + qo.size();
     
-    std::cout << "开始处理数据，总共 " << total_events << " 个事件..." << std::endl;
+    std::cout << "开始处理数据，总共 " << total_events << " 个事件（传感器数据）..." << std::endl;
     
     while (!pq.empty()) {
         Event ev = pq.top(); pq.pop();
