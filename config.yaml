@@ -17,5 +17,5 @@ debug:
 
 # File paths
 paths:
-  calibration_config: "../calibration_config.yaml"
+  calibration_config: "../data/calibration_config.yaml"
   output_prefix: "slam_"
