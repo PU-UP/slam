@@ -180,10 +180,12 @@ public:
     void updateGPS(const GpsMeasurement& gps_measurement);
     
 private:
-    // Covariance propagation
+    // Covariance propagation   
     void propagateCovariance_(double time_step,
-                              const Eigen::Vector3d& acceleration_wheel,
-                              const Eigen::Matrix3d& rotation_world_T_wheel);
+        const Eigen::Vector3d& acceleration_wheel,
+        const Eigen::Matrix3d& rotation_world_T_wheel,
+        const Eigen::Vector3d& angular_velocity_wheel);
+
     
     // Error state injection and reset
     void injectAndResetErrorState_();
@@ -336,7 +338,7 @@ inline void ErrorStateKalmanFilter::predictIMU(double timestamp,
     nominal_state_.orientation = quaternionRightUpdate(nominal_state_.orientation, angular_velocity_wheel * dt);
 
     // Propagate error covariance
-    propagateCovariance_(dt, acceleration_wheel, rotation_world_T_wheel);
+    propagateCovariance_(dt, acceleration_wheel, rotation_world_T_wheel, angular_velocity_wheel);
 
     // Apply non-holonomic constraints
     applyNonHolonomicConstraints_();
@@ -397,8 +399,10 @@ inline void ErrorStateKalmanFilter::updateGPS(const GpsMeasurement& gps_measurem
 // ---------------- Private Method Implementations ----------------
 
 inline void ErrorStateKalmanFilter::propagateCovariance_(double time_step,
-                                                          const Eigen::Vector3d& acceleration_wheel,
-                                                          const Eigen::Matrix3d& rotation_world_T_wheel) {
+                                                         const Eigen::Vector3d& acceleration_wheel,
+                                                         const Eigen::Matrix3d& rotation_world_T_wheel,
+                                                         const Eigen::Vector3d& angular_velocity_wheel) {
+
     Eigen::Matrix<double, ErrorState::STATE_DIMENSION, ErrorState::STATE_DIMENSION> state_transition_matrix = 
         Eigen::Matrix<double, ErrorState::STATE_DIMENSION, ErrorState::STATE_DIMENSION>::Zero();
     Eigen::Matrix<double, ErrorState::STATE_DIMENSION, 12> noise_jacobian = 
@@ -410,6 +414,8 @@ inline void ErrorStateKalmanFilter::propagateCovariance_(double time_step,
     state_transition_matrix.block<3, 3>(3, 6) = -rotation_world_T_wheel * skewSymmetric(acceleration_wheel);
     state_transition_matrix.block<3, 3>(3, 12) = -rotation_world_T_wheel * rotation_wheel_T_imu_;
     state_transition_matrix.block<3, 3>(6, 9) = -rotation_wheel_T_imu_;
+    // 姿态误差自身动力学：dot(dtheta) = -skew(omega_wheel) * dtheta - R_wi*dbg - R_wi*ng
+    state_transition_matrix.block<3, 3>(6, 6) = -skewSymmetric(angular_velocity_wheel);
 
     // Noise jacobian (IMU noise in IMU frame)
     noise_jacobian.block<3, 3>(6, 0) = -rotation_wheel_T_imu_;
