@@ -37,6 +37,51 @@
  * - Lever-arm effect compensation (optional)
  */
 
+ namespace eskf_checks {
+
+    // Toggle this if your filter uses left-multiplicative attitude error.
+    constexpr bool kRightMultiplicative = true;
+    
+    // Convert small angle to quaternion (robust for tiny angles)
+    inline Eigen::Quaterniond smallAngleQuat(const Eigen::Vector3d& dtheta) {
+        const double theta = dtheta.norm();
+        if (theta < 1e-12) {
+            // First-order: dq ≈ [1, 0.5*dtheta]
+            return Eigen::Quaterniond(1.0, 0.5*dtheta.x(), 0.5*dtheta.y(), 0.5*dtheta.z()).normalized();
+        }
+        Eigen::Vector3d axis = dtheta / theta;
+        const double half = 0.5 * theta;
+        return Eigen::Quaterniond(std::cos(half),
+                                  axis.x() * std::sin(half),
+                                  axis.y() * std::sin(half),
+                                  axis.z() * std::sin(half));
+    }
+    
+    // Evaluate measurement h(x): body-frame velocity v_b = R_bw * v_w
+    inline Eigen::Vector3d meas_body_velocity(
+        const Eigen::Quaterniond& q_nom,
+        const Eigen::Vector3d& v_world)
+    {
+        const Eigen::Matrix3d R_bw = q_nom.conjugate().toRotationMatrix(); // world->body
+        return R_bw * v_world;
+    }
+    
+    // Apply an attitude perturbation (right- or left-multiplicative)
+    inline Eigen::Quaterniond applyAttitudePerturb(
+        const Eigen::Quaterniond& q_nom,
+        const Eigen::Vector3d& dtheta)
+    {
+        const Eigen::Quaterniond dq = smallAngleQuat(dtheta);
+        if (kRightMultiplicative) {
+            return (q_nom * dq).normalized();       // q_true = q_nom ⊗ dq
+        } else {
+            return (dq * q_nom).normalized();       // q_true = dq ⊗ q_nom
+        }
+    }
+    
+} // namespace eskf_checks
+
+
 namespace eskf {
 
 // ---------------- Mathematical Utilities ----------------
@@ -63,6 +108,93 @@ inline Eigen::Quaterniond quaternionRightUpdate(const Eigen::Quaterniond& q, con
     Eigen::Quaterniond dq(1, 0.5*dtheta.x(), 0.5*dtheta.y(), 0.5*dtheta.z());
     return (q * dq).normalized();
 }
+
+// Analytical Jacobians for h(x) = R_bw * v_w
+inline void buildAnalyticalJacobianBlocks(
+    const Eigen::Quaterniond& q_nom,
+    const Eigen::Vector3d& v_world,
+    Eigen::Matrix3d& H_v,      // ∂h/∂δv
+    Eigen::Matrix3d& H_theta)  // ∂h/∂δθ
+{
+    const Eigen::Matrix3d R_bw = q_nom.conjugate().toRotationMatrix();
+    const Eigen::Vector3d v_b  = R_bw * v_world;
+
+    // Velocity error block
+    H_v = R_bw;
+
+    // Orientation error block (right-multiplicative sign)
+    // If your filter is left-multiplicative, flip the sign.
+    H_theta = eskf_checks::kRightMultiplicative ? skewSymmetric(v_b)
+                                                : -skewSymmetric(v_b);
+}
+
+// Central finite difference for the two 3x3 blocks
+inline void buildNumericalJacobianBlocks(
+    const Eigen::Quaterniond& q_nom,
+    const Eigen::Vector3d& v_world,
+    double h,
+    Eigen::Matrix3d& H_v_fd,
+    Eigen::Matrix3d& H_theta_fd)
+{
+    using namespace eskf_checks;
+
+    // Baseline measurement
+    const Eigen::Vector3d h0 = meas_body_velocity(q_nom, v_world);
+
+    // --- Orientation block: columns are partials wrt [dθx, dθy, dθz]
+    for (int k = 0; k < 3; ++k) {
+        Eigen::Vector3d e = Eigen::Vector3d::Zero(); e(k) = h;
+
+        const Eigen::Quaterniond q_plus  = applyAttitudePerturb(q_nom,  e);
+        const Eigen::Quaterniond q_minus = applyAttitudePerturb(q_nom, -e);
+
+        const Eigen::Vector3d h_plus  = meas_body_velocity(q_plus,  v_world);
+        const Eigen::Vector3d h_minus = meas_body_velocity(q_minus, v_world);
+
+        H_theta_fd.col(k) = (h_plus - h_minus) / (2.0 * h);
+    }
+
+    // --- Velocity block: because h = R_bw * v, vary v_world directly
+    const Eigen::Matrix3d R_bw = q_nom.conjugate().toRotationMatrix();
+    // Analytical expectation: H_v_fd ≡ R_bw
+    H_v_fd = R_bw;
+
+    // If you want to purely finite-difference H_v as well, uncomment:
+    // for (int k = 0; k < 3; ++k) {
+    //     Eigen::Vector3d e = Eigen::Vector3d::Zero(); e(k) = h;
+    //     Eigen::Vector3d h_plus  = meas_body_velocity(q_nom, v_world + e);
+    //     Eigen::Vector3d h_minus = meas_body_velocity(q_nom, v_world - e);
+    //     H_v_fd.col(k) = (h_plus - h_minus) / (2.0 * h);
+    // }
+}
+
+// Call this from your update function before using H (or from a debug path)
+inline void checkWheelVelocityJacobian(
+    const Eigen::Quaterniond& q_nom,
+    const Eigen::Vector3d& v_world,
+    double h = 1e-6)
+{
+    Eigen::Matrix3d H_v_ana, H_th_ana;
+    buildAnalyticalJacobianBlocks(q_nom, v_world, H_v_ana, H_th_ana);
+
+    Eigen::Matrix3d H_v_fd, H_th_fd;
+    buildNumericalJacobianBlocks(q_nom, v_world, h, H_v_fd, H_th_fd);
+
+    const double v_err_norm  = (H_v_fd  - H_v_ana).norm();
+    const double th_err_norm = (H_th_fd - H_th_ana).norm();
+
+    // std::cout << std::fixed << std::setprecision(6);
+    std::cout << "[Jacobian check] ||Hv_fd - Hv_ana||  = " << v_err_norm  << "\n";
+    std::cout << "[Jacobian check] ||Hth_fd - Hth_ana||= " << th_err_norm << "\n";
+
+    // Quick sign diagnostic for orientation block
+    const double th_err_flip = (H_th_fd + H_th_ana).norm();
+    if (th_err_norm > 1e-5 && th_err_flip < th_err_norm) {
+        std::cout << "  -> Orientation block looks sign-flipped vs. your convention.\n";
+        std::cout << "     Try toggling eskf_checks::kRightMultiplicative.\n";
+    }
+}
+
 
 // ---------------- Configuration and State Structures ----------------
 /**
@@ -378,35 +510,74 @@ inline double ErrorStateKalmanFilter::updateWheelSpeed(double timestamp, double 
     tryTriggerInitializationOrZupt_(timestamp);
     if (!is_initialized_) return 0.0;
 
-    // Measurement model: forward velocity in wheel frame
-    const Eigen::Matrix3d rotation_wheel_T_world = nominal_state_.orientation.conjugate().toRotationMatrix();
-    const Eigen::Vector3d velocity_in_wheel_frame = rotation_wheel_T_world * nominal_state_.velocity;
-    const double predicted_forward_velocity = velocity_in_wheel_frame.x();
+    // Rotation: world -> wheel/body
+    const Eigen::Matrix3d R_bw = nominal_state_.orientation.conjugate().toRotationMatrix();
 
-    // Jacobian of measurement with respect to error state
-    Eigen::Matrix<double, 1, ErrorState::STATE_DIMENSION> measurement_jacobian = 
-        Eigen::Matrix<double, 1, ErrorState::STATE_DIMENSION>::Zero();
-    
-    // Derivative with respect to velocity error
-    measurement_jacobian.block<1, 3>(0, 3) = Eigen::RowVector3d(1, 0, 0) * rotation_wheel_T_world;
-    
-    // Derivative with respect to orientation error
-    measurement_jacobian.block<1, 3>(0, 6) = Eigen::RowVector3d(1, 0, 0) * skewSymmetric(velocity_in_wheel_frame);
+    // Predicted measurement: wheel/body-frame velocity
+    const Eigen::Vector3d v_b = R_bw * nominal_state_.velocity;  // [vbx, vby, vbz]^T
 
-    // Kalman filter update
-    const double measurement_noise_variance = config_.wheel_speed_noise_std * config_.wheel_speed_noise_std;
-    const double innovation_variance = (measurement_jacobian * error_state_.covariance * 
-                                      measurement_jacobian.transpose())(0, 0) + measurement_noise_variance;
-    const Eigen::Matrix<double, ErrorState::STATE_DIMENSION, 1> kalman_gain = 
-        error_state_.covariance * measurement_jacobian.transpose() / innovation_variance;
-    
-    const double innovation = wheel_last_scaled_speed_ - predicted_forward_velocity;
-    error_state_.vector += kalman_gain * innovation;
-    error_state_.covariance = (Eigen::Matrix<double, ErrorState::STATE_DIMENSION, ErrorState::STATE_DIMENSION>::Identity() - 
-                             kalman_gain * measurement_jacobian) * error_state_.covariance;
+    // checkWheelVelocityJacobian(nominal_state_.orientation, nominal_state_.velocity, 1e-6);
+
+    // Build 3D measurement vector: encoder for x; pseudo-measurements for y,z as 0
+    Eigen::Vector3d z;
+    z << wheel_last_scaled_speed_, 0.0, 0.0;
+
+    // Innovation
+    const Eigen::Vector3d y = z - v_b;
+
+    // Jacobian H (3 x STATE_DIM)
+    Eigen::Matrix<double, 3, ErrorState::STATE_DIMENSION> H;
+    H.setZero();
+
+    // ∂(R_bw * v_w)/∂(velocity error) = R_bw
+    H.block<3,3>(0, 3) = R_bw;
+
+    // ∂(R_bw * v_w)/∂(orientation error) ≈ skew(v_b)
+    // (Sign convention matches your existing scalar-x update.)
+    H.block<3,3>(0, 6) = skewSymmetric(v_b);
+
+    // Measurement noise (per-axis). Tune these:
+    //  - x: from wheel speed sensor std
+    //  - y,z: pseudo-measurements; set small if you want to strongly enforce v_y=v_z=0,
+    //          larger if you want the filter to be more forgiving.
+    const double sx = config_.wheel_speed_noise_std;  // existing
+    // const double sy = (config_.wheel_lateral_zero_vel_noise_std > 0.0)
+    //                     ? config_.wheel_lateral_zero_vel_noise_std
+    //                     : 3.0 * sx;  // example default: looser than x
+    // const double sz = (config_.wheel_vertical_zero_vel_noise_std > 0.0)
+    //                     ? config_.wheel_vertical_zero_vel_noise_std
+    //                     : 3.0 * sx;
+    const double sy = 0; 
+    const double sz = 0;
+
+    Eigen::Matrix3d R;
+    R.setZero();
+    R(0,0) = sx * sx;
+    R(1,1) = sy * sy;
+    R(2,2) = sz * sz;
+
+    // Kalman gain: K = P H^T (H P H^T + R)^{-1}
+    const auto &P = error_state_.covariance;
+    Eigen::Matrix3d S = (H * P * H.transpose()) + R;
+    Eigen::Matrix<double, ErrorState::STATE_DIMENSION, 3> K =
+        P * H.transpose() * S.ldlt().solve(Eigen::Matrix3d::Identity());
+
+    // State/covariance update
+    error_state_.vector += K * y;
+
+    // Standard form:
+    error_state_.covariance =
+        (Eigen::Matrix<double, ErrorState::STATE_DIMENSION, ErrorState::STATE_DIMENSION>::Identity() - K * H) * P;
+
+    // If you prefer Joseph form for extra numerical stability, use this instead:
+    // Eigen::Matrix<double, ErrorState::STATE_DIMENSION, ErrorState::STATE_DIMENSION> I;
+    // I.setIdentity();
+    // error_state_.covariance = (I - K * H) * P * (I - K * H).transpose() + K * R * K.transpose();
 
     injectAndResetErrorState_();
-    return innovation;
+
+    // Return the forward-velocity innovation for continuity with existing callers
+    return y.x();
 }
 
 inline double ErrorStateKalmanFilter::updateWheelSpeed(double wheel_speed_raw) {
