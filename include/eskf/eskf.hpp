@@ -474,41 +474,68 @@ inline void ErrorStateKalmanFilter::injectAndResetErrorState_() {
 }
 
 inline void ErrorStateKalmanFilter::performStaticInitialization_() {
-    Eigen::Vector3d acceleration_mean = Eigen::Vector3d::Zero();
-    Eigen::Vector3d gyroscope_mean = Eigen::Vector3d::Zero();
-    
-    for (const auto& accel : initialization_acceleration_buffer_) {
-        acceleration_mean += accel;
+    // 1) 计算静止窗口内 IMU 均值
+    Eigen::Vector3d accel_mean = Eigen::Vector3d::Zero();
+    Eigen::Vector3d gyro_mean  = Eigen::Vector3d::Zero();
+
+    const size_t n_acc = initialization_acceleration_buffer_.size();
+    const size_t n_gyro = initialization_gyroscope_buffer_.size();
+    const size_t n = std::max<size_t>(1, n_acc);
+
+    for (const auto& a : initialization_acceleration_buffer_) accel_mean += a;
+    for (const auto& g : initialization_gyroscope_buffer_)   gyro_mean  += g;
+
+    accel_mean /= static_cast<double>(n);
+    if (n_gyro > 0) {
+        gyro_mean /= static_cast<double>(n_gyro);
     }
-    for (const auto& gyro : initialization_gyroscope_buffer_) {
-        gyroscope_mean += gyro;
-    }
-    
-    const double sample_count = std::max<size_t>(1, initialization_acceleration_buffer_.size());
-    acceleration_mean /= sample_count;
-    gyroscope_mean /= sample_count;
 
-    // Estimate gyroscope bias
-    nominal_state_.gyroscope_bias = gyroscope_mean;
+    // 2) 陀螺零偏：静止时平均角速度近似为零偏
+    nominal_state_.gyroscope_bias = gyro_mean;
 
-    // Align gravity vector to estimate initial orientation
-    const Eigen::Vector3d gravity_world_normalized = config_.gravity_world.normalized();
-    const Eigen::Vector3d negative_acceleration_normalized = (-acceleration_mean).normalized();
-    const Eigen::Quaterniond orientation_imu_T_world = 
-        Eigen::Quaterniond::FromTwoVectors(negative_acceleration_normalized, gravity_world_normalized);
-    const Eigen::Matrix3d rotation_world_T_imu = orientation_imu_T_world.toRotationMatrix().transpose();
+    // 3) 用重力对齐求 world_T_imu
+    //    静止时加速度计（按你当前惯性模型）≈ -R_imu_T_world * g_world + b_a
+    //    因此 -accel_mean 的方向与 g_world 的方向一致
+    const Eigen::Vector3d g_w_hat  = config_.gravity_world.normalized();
+    const Eigen::Vector3d minus_a_hat = (-accel_mean).normalized();
 
-    // Estimate accelerometer bias
-    nominal_state_.accelerometer_bias = acceleration_mean + rotation_world_T_imu * config_.gravity_world;
+    // R such that R * (-a_hat_in_imu) = g_hat_in_world
+    // ==> 这是 "IMU -> WORLD" 的旋转，即 world_T_imu
+    const Eigen::Quaterniond q_world_T_imu =
+        Eigen::Quaterniond::FromTwoVectors(minus_a_hat, g_w_hat).normalized();
 
-    // Compute initial wheel frame orientation
-    const Eigen::Matrix3d rotation_world_T_wheel = orientation_imu_T_world.toRotationMatrix() * rotation_imu_T_wheel_;
-    nominal_state_.orientation = Eigen::Quaterniond(rotation_world_T_wheel).normalized();
+    const Eigen::Matrix3d R_world_T_imu = q_world_T_imu.toRotationMatrix();
+    const Eigen::Matrix3d R_imu_T_world = R_world_T_imu.transpose();
+
+    // 4) 加计零偏（与你现有模型保持一致的号）
+    //    accel_mean ≈ -R_imu_T_world * g_w + b_a  =>  b_a ≈ accel_mean + R_imu_T_world * g_w
+    nominal_state_.accelerometer_bias = accel_mean + R_imu_T_world * config_.gravity_world;
+
+    // 5) 求 world_T_wheel：
+    //    已知外参 wheel_T_imu = R_wheel^imu
+    //    我们要 R_world^wheel = R_world^imu * R_imu^wheel = R_world_T_imu * (R_wheel_T_imu)^T
+    const Eigen::Matrix3d R_wheel_T_imu = rotation_wheel_T_imu_;      // from config/cache
+    const Eigen::Matrix3d R_imu_T_wheel = R_wheel_T_imu.transpose();
+
+    const Eigen::Matrix3d R_world_T_wheel = R_world_T_imu * R_imu_T_wheel;
+    nominal_state_.orientation = Eigen::Quaterniond(R_world_T_wheel).normalized();
+
+    // 6) 速度清零
     nominal_state_.velocity.setZero();
-    nominal_state_.timestamp = (initialization_start_time_ < 0) ? 0.0 : initialization_start_time_;
-    
+
+    // 7) 时间戳：用“最新的可用时间”避免下一步 predict 出现过大 dt
+    //    这里推荐用两路传感器里较新的那个时间
+    double t_ref = std::max(imu_last_timestamp_, wheel_last_timestamp_);
+    if (t_ref < 0.0) {
+        // 兜底，若都无效则用 init 窗口末端（也可直接用 current_timestamp 传参进来）
+        t_ref = (initialization_start_time_ < 0) ? 0.0 : initialization_start_time_;
+    }
+    nominal_state_.timestamp = t_ref;
+
+    // 8) 清空角速度缓存状态
     has_previous_angular_velocity_ = false;
 }
+
 
 inline void ErrorStateKalmanFilter::applyZeroVelocityUpdate_() {
     Eigen::Matrix<double, 3, ErrorState::STATE_DIMENSION> measurement_jacobian = 
