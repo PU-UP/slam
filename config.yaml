@@ -30,10 +30,10 @@ eskf:
   
   # IMU noise parameters (square root of power spectral density)
   imu_noise:
-    gyroscope_noise_density: 1.5e-3     # rad/s/√Hz
+    gyroscope_noise_density: 1.2e-3     # rad/s/√Hz
     accelerometer_noise_density: 2.5e-1  # m/s²/√Hz
     gyroscope_random_walk: 1.0e-5        # rad/s²/√Hz
-    accelerometer_random_walk: 1.0e-3    # m/s³/√Hz
+    accelerometer_random_walk: 1.0e-2    # m/s³/√Hz
   
   # Wheel speed measurement parameters
   wheel_speed:

@@ -446,10 +446,11 @@ inline void ErrorStateKalmanFilter::setWheelToImuTransform(const Eigen::Isometry
     translation_imu_in_wheel_ = transform.translation();
 }
 
-inline void ErrorStateKalmanFilter::predictIMU(double timestamp, 
-                                              const Eigen::Vector3d& gyroscope_raw,
-                                              const Eigen::Vector3d& accelerometer_raw) {
-    // Update IMU static detection buffers
+inline void ErrorStateKalmanFilter::predictIMU(
+    double timestamp,
+    const Eigen::Vector3d& gyroscope_raw,
+    const Eigen::Vector3d& accelerometer_raw)
+{
     updateImuStaticDetection_(timestamp, gyroscope_raw, accelerometer_raw);
 
     if (!is_initialized_) {
@@ -461,46 +462,67 @@ inline void ErrorStateKalmanFilter::predictIMU(double timestamp,
     const double dt = std::max(1e-6, timestamp - nominal_state_.timestamp);
     nominal_state_.timestamp = timestamp;
 
-    // Remove sensor biases
-    const Eigen::Vector3d gyroscope_corrected = gyroscope_raw - nominal_state_.gyroscope_bias;
-    const Eigen::Vector3d accelerometer_corrected = accelerometer_raw - nominal_state_.accelerometer_bias;
+    // 1) Bias-correct in IMU frame
+    const Eigen::Vector3d w_i = gyroscope_raw    - nominal_state_.gyroscope_bias;
+    const Eigen::Vector3d f_i = accelerometer_raw - nominal_state_.accelerometer_bias; // specific force (m/s^2)
 
-    // Transform measurements to wheel frame
-    const Eigen::Vector3d angular_velocity_wheel = rotation_wheel_T_imu_ * gyroscope_corrected;
-    Eigen::Vector3d acceleration_wheel = rotation_wheel_T_imu_ * accelerometer_corrected;
+    // 2) Transform to wheel frame once
+    const Eigen::Vector3d w_wheel = rotation_wheel_T_imu_ * w_i;
+    Eigen::Vector3d f_wheel = rotation_wheel_T_imu_ * f_i;
 
-    // Optional lever-arm compensation
+    // 3) Lever-arm compensation on specific force (still in wheel frame)
     if (config_.enable_lever_arm_compensation && has_previous_angular_velocity_) {
-        const Eigen::Vector3d angular_acceleration_wheel = 
-            (angular_velocity_wheel - angular_velocity_wheel_previous_) / dt;
-        acceleration_wheel = acceleration_wheel - 
-            angular_acceleration_wheel.cross(translation_imu_in_wheel_) -
-            angular_velocity_wheel.cross(angular_velocity_wheel.cross(translation_imu_in_wheel_));
+        const Eigen::Vector3d alpha_wheel =
+            (w_wheel - angular_velocity_wheel_previous_) / dt;
+        // f_origin = f_imu - α×r - ω×(ω×r)
+        f_wheel -= alpha_wheel.cross(translation_imu_in_wheel_);
+        f_wheel -= w_wheel.cross(w_wheel.cross(translation_imu_in_wheel_));
     }
-
-    // Cache angular velocity for next iteration
-    angular_velocity_wheel_previous_ = angular_velocity_wheel;
-    angular_velocity_wheel_last_ = angular_velocity_wheel;
+    angular_velocity_wheel_previous_ = w_wheel;
+    angular_velocity_wheel_last_ = w_wheel;
     has_previous_angular_velocity_ = true;
 
-    // Propagate nominal state
-    const Eigen::Matrix3d rotation_world_T_wheel = nominal_state_.orientation.toRotationMatrix();
-    const Eigen::Vector3d acceleration_world = 
-        rotation_world_T_wheel * acceleration_wheel + config_.gravity_world;
+    // 4) Midpoint integration for attitude
+    // q_k represents world_T_wheel (R_wT_w)
+    const Eigen::Quaterniond qk = nominal_state_.orientation;
 
-    nominal_state_.position += nominal_state_.velocity * dt + 0.5 * acceleration_world * dt * dt;
-    nominal_state_.velocity += acceleration_world * dt;
-    nominal_state_.orientation = quaternionRightUpdate(nominal_state_.orientation, angular_velocity_wheel * dt);
+    // Small-angle quaternion update helper (right-multiplicative)
+    auto Expq = [](const Eigen::Vector3d& phi)->Eigen::Quaterniond {
+        const double th = phi.norm();
+        if (th < 1e-12) return Eigen::Quaterniond(1, 0.5*phi.x(), 0.5*phi.y(), 0.5*phi.z()).normalized();
+        const double h = 0.5*th;
+        const double s = std::sin(h)/th;
+        return Eigen::Quaterniond(std::cos(h), s*phi.x(), s*phi.y(), s*phi.z());
+    };
 
-    // Propagate error covariance
-    propagateCovariance_(dt, acceleration_wheel, rotation_world_T_wheel, angular_velocity_wheel);
+    // Midpoint body rate (wheel frame) — here we only have current sample; if you have prev sample,
+    // you can also average w_k and w_{k-1}. Using w_k is still better with midpoint rotation below.
+    const Eigen::Vector3d w_mid = w_wheel;
 
-    // Apply non-holonomic constraints
+    // Half-step attitude for rotating the specific force
+    const Eigen::Quaterniond q_half = (qk * Expq(w_mid * (0.5 * dt))).normalized();
+
+    // 5) Rotate specific force at midpoint to world, then add gravity
+    const Eigen::Matrix3d R_wT_wheel_half = q_half.toRotationMatrix();      // world <- wheel
+    const Eigen::Vector3d a_world = R_wT_wheel_half * f_wheel + config_.gravity_world;
+
+    // 6) Integrate state with midpoint acceleration
+    nominal_state_.position   += nominal_state_.velocity * dt + 0.5 * a_world * dt * dt;
+    nominal_state_.velocity   += a_world * dt;
+    nominal_state_.orientation = (qk * Expq(w_mid * dt)).normalized();
+
+    // 7) Propagate covariance (F, G built at current sample are fine;
+    //    passing acceleration_wheel as the specific force is consistent)
+    const Eigen::Matrix3d R_wT_wheel_now = qk.toRotationMatrix();
+    propagateCovariance_(dt, f_wheel, R_wT_wheel_now, w_wheel);
+
+    // 8) Non-holonomic constraints (consider gating by small |roll|, |pitch|, |w_z|)
     applyNonHolonomicConstraints_();
 
-    // Check for zero-velocity update opportunity
+    // 9) ZUPT trigger
     tryTriggerInitializationOrZupt_(timestamp);
 }
+
 
 inline double ErrorStateKalmanFilter::updateWheelSpeed(double timestamp, double wheel_speed_raw) {
     wheel_last_scaled_speed_ = config_.wheel_speed_scale_factor * wheel_speed_raw;
