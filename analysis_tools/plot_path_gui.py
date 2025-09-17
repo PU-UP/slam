@@ -9,6 +9,27 @@ import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider, Button
 
 
+def quaternion_to_euler(qw, qx, qy, qz):
+    """
+    Convert quaternion to Euler angles (roll, pitch, yaw) in radians
+    """
+    # Roll (x-axis rotation)
+    sinr_cosp = 2 * (qw * qx + qy * qz)
+    cosr_cosp = 1 - 2 * (qx * qx + qy * qy)
+    roll = np.arctan2(sinr_cosp, cosr_cosp)
+
+    # Pitch (y-axis rotation)
+    sinp = 2 * (qw * qy - qz * qx)
+    pitch = np.where(np.abs(sinp) >= 1, np.copysign(np.pi / 2, sinp), np.arcsin(sinp))
+
+    # Yaw (z-axis rotation)
+    siny_cosp = 2 * (qw * qz + qx * qy)
+    cosy_cosp = 1 - 2 * (qy * qy + qz * qz)
+    yaw = np.arctan2(siny_cosp, cosy_cosp)
+
+    return roll, pitch, yaw
+
+
 def load_path_txt(path):
     df = pd.read_csv(path)
     # Handle possible spaces in column names
@@ -33,24 +54,46 @@ def main():
     px = df["px"].to_numpy()
     py = df["py"].to_numpy()
     pz = df["pz"].to_numpy()
+    vx = df["vx"].to_numpy()
+    vy = df["vy"].to_numpy()
+    vz = df["vz"].to_numpy()
+    qw = df["qw"].to_numpy()
+    qx = df["qx"].to_numpy()
+    qy = df["qy"].to_numpy()
+    qz = df["qz"].to_numpy()
+    
+    # Convert quaternions to Euler angles (in degrees for better readability)
+    roll, pitch, yaw = quaternion_to_euler(qw, qx, qy, qz)
+    roll_deg = np.degrees(roll)
+    pitch_deg = np.degrees(pitch)
+    yaw_deg = np.degrees(yaw)
+    
+    # Calculate velocities
+    v_xy = np.sqrt(vx**2 + vy**2)  # XY plane velocity magnitude
 
     t_min, t_max = float(t.min()), float(t.max())
     # Initial window: full range
     win = [t_min, t_max]
 
     # ---------- Canvas layout ----------
-    plt.figure(figsize=(10,6))
-    ax_xy = plt.axes([0.08, 0.30, 0.54, 0.65])  # Top left: XY trajectory
-    ax_z  = plt.axes([0.70, 0.30, 0.27, 0.65])  # Top right: Z-time curve
+    plt.figure(figsize=(16,10))
+    # Top row: XY trajectory, Z-time, Angles
+    ax_xy = plt.axes([0.05, 0.55, 0.28, 0.40])     # Top left: XY trajectory
+    ax_z  = plt.axes([0.36, 0.55, 0.28, 0.40])     # Top center: Z-time curve
+    ax_angles = plt.axes([0.67, 0.55, 0.28, 0.40]) # Top right: Angles vs time
+    
+    # Bottom row: XY velocity, Z velocity
+    ax_v_xy = plt.axes([0.05, 0.25, 0.42, 0.25])   # Bottom left: XY velocity
+    ax_v_z  = plt.axes([0.53, 0.25, 0.42, 0.25])   # Bottom right: Z velocity
 
-    ax_smin = plt.axes([0.08, 0.18, 0.84, 0.03]) # Bottom: min time slider
-    ax_smax = plt.axes([0.08, 0.13, 0.84, 0.03]) # Bottom: max time slider
+    ax_smin = plt.axes([0.05, 0.15, 0.90, 0.03])   # Bottom: min time slider
+    ax_smax = plt.axes([0.05, 0.10, 0.90, 0.03])   # Bottom: max time slider
 
-    ax_btn_reset  = plt.axes([0.08, 0.06, 0.12, 0.05])
-    ax_btn_save   = plt.axes([0.22, 0.06, 0.12, 0.05])
+    ax_btn_reset  = plt.axes([0.05, 0.03, 0.12, 0.05])
+    ax_btn_save   = plt.axes([0.20, 0.03, 0.12, 0.05])
 
     # Top text bar
-    ax_info = plt.axes([0.08, 0.95, 0.89, 0.03])
+    ax_info = plt.axes([0.05, 0.97, 0.90, 0.02])
     ax_info.axis("off")
     info_text = ax_info.text(0.01, 0.5, "", va="center", ha="left")
 
@@ -61,6 +104,7 @@ def main():
 
     mask = subset(win[0], win[1])
 
+    # XY trajectory plot
     xy_line, = ax_xy.plot(px[mask], py[mask], linewidth=1.5)
     ax_xy.set_aspect("equal", adjustable="box")
     ax_xy.set_xlabel("X (m)")
@@ -68,11 +112,36 @@ def main():
     ax_xy.grid(True, linestyle="--", alpha=0.4)
     ax_xy.set_title("XY Trajectory")
 
+    # Z vs time plot
     z_line, = ax_z.plot(t[mask], pz[mask], linewidth=1.2)
     ax_z.set_xlabel("Time (s)")
     ax_z.set_ylabel("Z (m)")
     ax_z.grid(True, linestyle="--", alpha=0.4)
     ax_z.set_title("Z vs Time")
+    
+    # Angles vs time plot
+    roll_line, = ax_angles.plot(t[mask], roll_deg[mask], 'r-', linewidth=1.2, label='Roll')
+    pitch_line, = ax_angles.plot(t[mask], pitch_deg[mask], 'g-', linewidth=1.2, label='Pitch')
+    yaw_line, = ax_angles.plot(t[mask], yaw_deg[mask], 'b-', linewidth=1.2, label='Yaw')
+    ax_angles.set_xlabel("Time (s)")
+    ax_angles.set_ylabel("Angle (deg)")
+    ax_angles.grid(True, linestyle="--", alpha=0.4)
+    ax_angles.set_title("Roll, Pitch, Yaw vs Time")
+    ax_angles.legend()
+    
+    # XY velocity vs time plot
+    v_xy_line, = ax_v_xy.plot(t[mask], v_xy[mask], 'purple', linewidth=1.2)
+    ax_v_xy.set_xlabel("Time (s)")
+    ax_v_xy.set_ylabel("XY Velocity (m/s)")
+    ax_v_xy.grid(True, linestyle="--", alpha=0.4)
+    ax_v_xy.set_title("XY Plane Velocity vs Time")
+    
+    # Z velocity vs time plot
+    v_z_line, = ax_v_z.plot(t[mask], vz[mask], 'orange', linewidth=1.2)
+    ax_v_z.set_xlabel("Time (s)")
+    ax_v_z.set_ylabel("Z Velocity (m/s)")
+    ax_v_z.grid(True, linestyle="--", alpha=0.4)
+    ax_v_z.set_title("Z Velocity vs Time")
 
     # ---------- Sliders ----------
     s_min = Slider(ax=ax_smin, label="t_min", valmin=t_min, valmax=t_max, valinit=win[0])
@@ -87,11 +156,23 @@ def main():
         # Update curve data
         xy_line.set_xdata(px[m]); xy_line.set_ydata(py[m])
         z_line.set_xdata(t[m]);   z_line.set_ydata(pz[m])
+        
+        # Update angle plots
+        roll_line.set_xdata(t[m]); roll_line.set_ydata(roll_deg[m])
+        pitch_line.set_xdata(t[m]); pitch_line.set_ydata(pitch_deg[m])
+        yaw_line.set_xdata(t[m]); yaw_line.set_ydata(yaw_deg[m])
+        
+        # Update velocity plots
+        v_xy_line.set_xdata(t[m]); v_xy_line.set_ydata(v_xy[m])
+        v_z_line.set_xdata(t[m]); v_z_line.set_ydata(vz[m])
 
         # Auto-scale bounds
         if np.any(m):
             ax_xy.relim(); ax_xy.autoscale_view()
             ax_z.relim();  ax_z.autoscale_view()
+            ax_angles.relim(); ax_angles.autoscale_view()
+            ax_v_xy.relim(); ax_v_xy.autoscale_view()
+            ax_v_z.relim(); ax_v_z.autoscale_view()
 
         # Update info bar
         n = int(np.sum(m))
