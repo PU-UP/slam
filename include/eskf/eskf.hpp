@@ -158,6 +158,14 @@ struct GpsMeasurement {
     bool has_position_fix = true;
 };
 
+
+struct InitCheckReport {
+    bool ok = false;
+    double score = 0.0;              // 0~1，越大越好
+    std::string summary;             // 一句话结论
+    std::vector<std::string> details;// 逐项检查结果
+};
+
 // ---------------- Error-State Kalman Filter Class ----------------
 class ErrorStateKalmanFilter {
 public:
@@ -176,6 +184,9 @@ public:
     // Configuration modifiers
     void setWheelSpeedScaleFactor(double scale_factor);
     void setWheelToImuTransform(const Eigen::Isometry3d& transform);
+
+    // 在初始化完成后调用；也可以在外部拿到report调试
+    bool validateInitialization(InitCheckReport* report = nullptr) const;
     
     // Prediction step with IMU measurements
     void predictIMU(double timestamp, 
@@ -251,6 +262,10 @@ private:
     size_t static_window_sample_count_ = 0;
     std::vector<Eigen::Vector3d> zupt_acceleration_buffer_;
     std::vector<Eigen::Vector3d> zupt_gyroscope_buffer_;
+
+    // 可复用静止窗口均值（若已清空，建议在初始化时缓存一份）
+    Eigen::Vector3d cached_init_accel_mean_ = Eigen::Vector3d::Zero();
+    Eigen::Vector3d cached_init_gyro_mean_  = Eigen::Vector3d::Zero();
 };
 
   // ---------------- Implementation ----------------
@@ -788,5 +803,156 @@ inline FilterConfig FilterConfig::loadFromYaml(const YAML::Node& config_node) {
     
     return config;
 }
+
+inline bool ErrorStateKalmanFilter::validateInitialization(InitCheckReport* report) const {
+    InitCheckReport rep;
+    auto add = [&](const std::string& s){ rep.details.push_back(s); };
+
+    if (!is_initialized_) {
+        rep.ok = false;
+        rep.summary = "未初始化：is_initialized_ = false";
+        if (report) *report = rep;
+        return false;
+    }
+
+    // 0) 取姿态与常用矩阵
+    const Eigen::Matrix3d R_world_T_wheel = nominal_state_.orientation.toRotationMatrix();
+    const Eigen::Matrix3d R_wheel_T_world = R_world_T_wheel.transpose();
+
+    // 由外参得到 IMU与Wheel关系
+    const Eigen::Matrix3d R_wheel_T_imu = rotation_wheel_T_imu_;
+    const Eigen::Matrix3d R_imu_T_wheel = R_wheel_T_imu.transpose();
+
+    // 1) 通过 wheel 姿态 + 外参 推回 world_T_imu（路径A）
+    const Eigen::Matrix3d R_world_T_imu_via_extrinsic = R_world_T_wheel * R_imu_T_wheel;
+
+    // 2) 通过重力对齐（路径B）：由初始化窗口的加速度均值恢复 world_T_imu
+    Eigen::Vector3d a_mean = cached_init_accel_mean_;
+    if (a_mean.isZero(1e-12)) {
+        // 如果没缓存，退化用当前ZUPT缓冲均值或放弃此项
+        add("警告：未缓存初始化期加速度均值，跳过重力对齐一致性对比。");
+    }
+    Eigen::Matrix3d R_world_T_imu_via_gravity = R_world_T_imu_via_extrinsic; // 默认给个值防未用
+    bool gravity_path_valid = false;
+    if (!a_mean.isZero(1e-12)) {
+        const Eigen::Vector3d g_w_hat = config_.gravity_world.normalized();
+        const Eigen::Vector3d minus_a_hat = (-a_mean).normalized();
+        Eigen::Quaterniond q_world_T_imu =
+            Eigen::Quaterniond::FromTwoVectors(minus_a_hat, g_w_hat).normalized();
+        R_world_T_imu_via_gravity = q_world_T_imu.toRotationMatrix();
+        gravity_path_valid = true;
+    }
+
+    // 3) 姿态正交性
+    double ortho_err = (R_world_T_wheel.transpose()*R_world_T_wheel - Eigen::Matrix3d::Identity()).norm();
+    bool ortho_ok = (std::abs(R_world_T_wheel.determinant()-1.0) < 1e-3) && (ortho_err < 1e-3);
+    add("姿态正交性误差 ||R^T R - I|| = " + std::to_string(ortho_err) +
+        (ortho_ok ? " [OK]" : " [BAD]"));
+
+    // 4) 重力方向一致性（在 wheel/imu 中检查）
+    //    先把世界重力转到 IMU：g_imu = R_imu^world * g
+    bool gravity_dir_ok = true;
+    double gravity_angle_deg = 0.0, gravity_mag_err = 0.0;
+    {
+        const Eigen::Matrix3d R_imu_T_world = R_world_T_imu_via_extrinsic.transpose();
+        Eigen::Vector3d g_imu = R_imu_T_world * config_.gravity_world;
+
+        if (!a_mean.isZero(1e-12)) {
+            Eigen::Vector3d a_hat = a_mean.normalized();
+            Eigen::Vector3d minus_g_imu_hat = (-g_imu).normalized(); // 理想应与 a_hat 对齐
+            double cosang = std::clamp(a_hat.dot(minus_g_imu_hat), -1.0, 1.0);
+            gravity_angle_deg = std::acos(cosang) * 180.0 / M_PI;
+            gravity_mag_err = std::abs(a_mean.norm() - config_.gravity_world.norm());
+            gravity_dir_ok = (gravity_angle_deg < 3.0) && (gravity_mag_err < 0.5);
+            add("重力方向夹角 = " + std::to_string(gravity_angle_deg) +
+                " deg, 加速度模长误差 = " + std::to_string(gravity_mag_err) +
+                (gravity_dir_ok ? " [OK]" : " [BAD]"));
+        } else {
+            add("跳过重力一致性：无初始化期加速度均值缓存。");
+        }
+    }
+
+    // 5) 陀螺零偏大小
+    double bg_norm = nominal_state_.gyroscope_bias.norm();
+    bool bg_ok = (bg_norm < 0.02); // 参考阈值
+    add("陀螺零偏范数 = " + std::to_string(bg_norm) + (bg_ok ? " [OK]" : " [BAD]"));
+
+    // 6) 加计零偏大小
+    double ba_norm = nominal_state_.accelerometer_bias.norm();
+    bool ba_ok = (ba_norm < 1.5); // 参考阈值
+    add("加计零偏范数 = " + std::to_string(ba_norm) + (ba_ok ? " [OK]" : " [BAD]"));
+
+    // 7) 外参-重力一致性（两条路径求的 world_T_imu 是否一致）
+    bool extrinsic_consistent = true;
+    double dtheta_ex_deg = 0.0;
+    if (gravity_path_valid) {
+        Eigen::Matrix3d dR = R_world_T_imu_via_extrinsic.transpose() * R_world_T_imu_via_gravity; // imu系下误差
+        double cosang = std::clamp((dR.trace()-1.0)/2.0, -1.0, 1.0);
+        dtheta_ex_deg = std::acos(cosang) * 180.0 / M_PI;
+        extrinsic_consistent = (dtheta_ex_deg < 3.0);
+        add("外参一致性：via_extrinsic 与 via_gravity 的差角 = " +
+            std::to_string(dtheta_ex_deg) + " deg" + (extrinsic_consistent ? " [OK]" : " [BAD]"));
+    }
+
+    // 8) 车辆几何合理性（前向轴与重力夹角应 ~90°）
+    bool wheel_axes_ok = true;
+    {
+        // wheel 前向 x_wheel 在世界系：x_w = R_world_T_wheel * [1,0,0]
+        Eigen::Vector3d x_w = R_world_T_wheel * Eigen::Vector3d::UnitX();
+        Eigen::Vector3d g_w_hat = config_.gravity_world.normalized();
+        double cosang = std::abs(std::clamp(x_w.dot(g_w_hat), -1.0, 1.0));
+        double angle_deg = std::acos(cosang) * 180.0 / M_PI; // 与竖直夹角
+        // 接近 90° 更合理，放宽： [70°, 110°]
+        wheel_axes_ok = (angle_deg > 70.0 && angle_deg < 110.0);
+        add("车辆前向轴与重力夹角 = " + std::to_string(angle_deg) + " deg" +
+            (wheel_axes_ok ? " [OK]" : " [SUSPECT]"));
+    }
+
+    // 9) 初始速度在 wheel 系应接近 0
+    bool v_zero_ok = true;
+    {
+        Eigen::Vector3d v_wheel = R_wheel_T_world * nominal_state_.velocity;
+        double vnorm = v_wheel.norm();
+        v_zero_ok = (vnorm < 0.05);
+        add("静止期初始速度 ‖v_wheel‖ = " + std::to_string(vnorm) + (v_zero_ok ? " [OK]" : " [BAD]"));
+    }
+
+    // 10) 协方差尺度（简单检查）
+    bool cov_ok = true;
+    {
+        double pos_var = error_state_.covariance.block<3,3>(0,0).diagonal().mean();
+        double vel_var = error_state_.covariance.block<3,3>(3,3).diagonal().mean();
+        double att_var = error_state_.covariance.block<3,3>(6,6).diagonal().mean();
+        // 粗阈值：姿态 < (5°)^2 ≈ 0.0076；速度 < 0.2^2 = 0.04；位置 < 1^2 = 1
+        cov_ok = (att_var < 0.01 && vel_var < 0.1 && pos_var < 4.0);
+        add("协方差均值: pos=" + std::to_string(pos_var) +
+            ", vel=" + std::to_string(vel_var) +
+            ", att=" + std::to_string(att_var) +
+            (cov_ok ? " [OK]" : " [SUSPECT]"));
+    }
+
+    // 汇总：一个简单的“得分”/门限
+    int pass_cnt = 0, total = 0;
+    auto count = [&](bool b){ total++; if (b) pass_cnt++; };
+
+    count(ortho_ok);
+    count(gravity_dir_ok || !gravity_path_valid);
+    count(bg_ok);
+    count(ba_ok);
+    count(extrinsic_consistent || !gravity_path_valid);
+    count(wheel_axes_ok);
+    count(v_zero_ok);
+    count(cov_ok);
+
+    rep.score = total ? (double)pass_cnt / (double)total : 0.0;
+    rep.ok = rep.score > 0.75; // 通过阈值可调
+    rep.summary = rep.ok ?
+        "初始化校验通过，整体一致性良好（score=" + std::to_string(rep.score) + ")."
+      : "初始化校验未通过/可疑（score=" + std::to_string(rep.score) + "). 建议检查外参与静止窗口数据。";
+
+    if (report) *report = rep;
+    return rep.ok;
+}
+
 
 } // namespace eskf
