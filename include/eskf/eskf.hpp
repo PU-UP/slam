@@ -138,9 +138,6 @@ inline void buildNumericalJacobianBlocks(
 {
     using namespace eskf_checks;
 
-    // Baseline measurement
-    const Eigen::Vector3d h0 = meas_body_velocity(q_nom, v_world);
-
     // --- Orientation block: columns are partials wrt [dθx, dθy, dθz]
     for (int k = 0; k < 3; ++k) {
         Eigen::Vector3d e = Eigen::Vector3d::Zero(); e(k) = h;

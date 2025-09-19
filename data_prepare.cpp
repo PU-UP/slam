@@ -320,6 +320,11 @@ bool LoadMainConfiguration(const std::string& config_path, MainConfig& config) {
             const auto& paths_node = config_file["paths"];
             config.calibration_config_path = paths_node["calibration_config"].as<std::string>(config.calibration_config_path);
             config.output_prefix = paths_node["output_prefix"].as<std::string>(config.output_prefix);
+            
+            // Load data file paths
+            config.gnss_file = paths_node["gnss_file"].as<std::string>(config.gnss_file);
+            config.imu_file = paths_node["imu_file"].as<std::string>(config.imu_file);
+            config.odom_file = paths_node["odom_file"].as<std::string>(config.odom_file);
         }
         
         

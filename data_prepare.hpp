@@ -288,6 +288,11 @@ struct MainConfig {
     // File paths
     std::string calibration_config_path = "../calibration_config.yaml";
     std::string output_prefix = "slam_";
+    
+    // Data file paths
+    std::string gnss_file = "../data2/gnss_data.txt";
+    std::string imu_file = "../data2/bmi_imu_data.txt";
+    std::string odom_file = "../data2/odom_data.txt";
 };
 
 // Load main configuration from YAML file

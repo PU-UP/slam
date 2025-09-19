@@ -137,9 +137,9 @@ int main(int argc, char** argv) {
     using namespace bagio;
 
     TxtDataLoader::Options options;
-    options.gnss_file = "../data/gnss_data.txt";
-    options.imu_file = "../data/bmi_imu_data.txt";
-    options.odom_file = "../data/odom_data.txt";
+    options.gnss_file = config.gnss_file;
+    options.imu_file = config.imu_file;
+    options.odom_file = config.odom_file;
 
     TxtDataLoader data_loader(options);
     data_loader.load();
