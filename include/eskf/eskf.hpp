@@ -6,6 +6,7 @@
 #include <limits>
 #include <cmath>
 #include <iostream>
+#include <iomanip> 
 #include <yaml-cpp/yaml.h>
 
 /**
@@ -628,7 +629,7 @@ inline void ErrorStateKalmanFilter::propagateCovariance_(double time_step,
     state_transition_matrix.block<3, 3>(3, 12) = -rotation_world_T_wheel * rotation_wheel_T_imu_;
     state_transition_matrix.block<3, 3>(6, 9) = -rotation_wheel_T_imu_;
     // 姿态误差自身动力学：dot(dtheta) = -skew(omega_wheel) * dtheta - R_wi*dbg - R_wi*ng
-    state_transition_matrix.block<3, 3>(6, 6) = -skewSymmetric(angular_velocity_wheel);
+    // state_transition_matrix.block<3, 3>(6, 6) = -skewSymmetric(angular_velocity_wheel);
 
     // Noise jacobian (IMU noise in IMU frame)
     noise_jacobian.block<3, 3>(6, 0) = -rotation_wheel_T_imu_;
@@ -694,6 +695,13 @@ inline void ErrorStateKalmanFilter::performStaticInitialization_() {
     if (n_gyro > 0) {
         gyro_mean /= static_cast<double>(n_gyro);
     }
+
+    std::cout << std::fixed << std::setprecision(10);
+    std::cout << "acc norm: " << accel_mean.norm() << std::endl;
+    std::cout << "accel_mean: " << accel_mean.transpose() << std::endl;
+    std::cout << "accel_wheel: "<< (rotation_wheel_T_imu_ * accel_mean).transpose() << std::endl;
+
+    config_.gravity_world = Eigen::Vector3d(0, 0, -accel_mean.norm());
 
     // 2) 陀螺零偏：静止时平均角速度近似为零偏
     nominal_state_.gyroscope_bias = gyro_mean;
