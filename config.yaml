@@ -53,13 +53,6 @@ eskf:
     acceleration_threshold: 0.06         # m/s²
     minimum_duration: 4                # seconds
     minimum_samples: 200                  # samples
-    velocity_noise_std: 0.005            # m/s
-    bias_nudging_factor: 0.001           # dimensionless
-  
-  # Non-holonomic constraint parameters
-  nhc:
-    velocity_threshold: 0.0005           # m/s
-    lateral_noise_std: 0.0001            # m/s
   
   # Lever-arm compensation
   enable_lever_arm_compensation: true

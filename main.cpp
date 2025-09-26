@@ -260,17 +260,6 @@ int main(int argc, char** argv) {
         }
 
         if (filter.isInitialized()) {
-            static bool displayed = false;
-            if (!displayed) {
-                displayed = true;
-                InitCheckReport report;
-                filter.validateInitialization(&report);
-                std::cout << "初始化检查报告: " << report.summary << std::endl;
-                for (const auto& detail : report.details) {
-                    std::cout << "  " << detail << std::endl;
-                }
-            }
-
             const auto& S = filter.getNominalState();
             fout << S.timestamp << ","
                      << S.position.x() << "," << S.position.y() << "," << S.position.z() << ","

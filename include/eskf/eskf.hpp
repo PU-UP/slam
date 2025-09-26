@@ -38,51 +38,6 @@
  * - Lever-arm effect compensation (optional)
  */
 
- namespace eskf_checks {
-
-    // Toggle this if your filter uses left-multiplicative attitude error.
-    constexpr bool kRightMultiplicative = true;
-    
-    // Convert small angle to quaternion (robust for tiny angles)
-    inline Eigen::Quaterniond smallAngleQuat(const Eigen::Vector3d& dtheta) {
-        const double theta = dtheta.norm();
-        if (theta < 1e-12) {
-            // First-order: dq ≈ [1, 0.5*dtheta]
-            return Eigen::Quaterniond(1.0, 0.5*dtheta.x(), 0.5*dtheta.y(), 0.5*dtheta.z()).normalized();
-        }
-        Eigen::Vector3d axis = dtheta / theta;
-        const double half = 0.5 * theta;
-        return Eigen::Quaterniond(std::cos(half),
-                                  axis.x() * std::sin(half),
-                                  axis.y() * std::sin(half),
-                                  axis.z() * std::sin(half));
-    }
-    
-    // Evaluate measurement h(x): body-frame velocity v_b = R_bw * v_w
-    inline Eigen::Vector3d meas_body_velocity(
-        const Eigen::Quaterniond& q_nom,
-        const Eigen::Vector3d& v_world)
-    {
-        const Eigen::Matrix3d R_bw = q_nom.conjugate().toRotationMatrix(); // world->body
-        return R_bw * v_world;
-    }
-    
-    // Apply an attitude perturbation (right- or left-multiplicative)
-    inline Eigen::Quaterniond applyAttitudePerturb(
-        const Eigen::Quaterniond& q_nom,
-        const Eigen::Vector3d& dtheta)
-    {
-        const Eigen::Quaterniond dq = smallAngleQuat(dtheta);
-        if (kRightMultiplicative) {
-            return (q_nom * dq).normalized();       // q_true = q_nom ⊗ dq
-        } else {
-            return (dq * q_nom).normalized();       // q_true = dq ⊗ q_nom
-        }
-    }
-    
-} // namespace eskf_checks
-
-
 namespace eskf {
 
 // ---------------- Mathematical Utilities ----------------
@@ -109,90 +64,6 @@ inline Eigen::Quaterniond quaternionRightUpdate(const Eigen::Quaterniond& q, con
     Eigen::Quaterniond dq(1, 0.5*dtheta.x(), 0.5*dtheta.y(), 0.5*dtheta.z());
     return (q * dq).normalized();
 }
-
-// Analytical Jacobians for h(x) = R_bw * v_w
-inline void buildAnalyticalJacobianBlocks(
-    const Eigen::Quaterniond& q_nom,
-    const Eigen::Vector3d& v_world,
-    Eigen::Matrix3d& H_v,      // ∂h/∂δv
-    Eigen::Matrix3d& H_theta)  // ∂h/∂δθ
-{
-    const Eigen::Matrix3d R_bw = q_nom.conjugate().toRotationMatrix();
-    const Eigen::Vector3d v_b  = R_bw * v_world;
-
-    // Velocity error block
-    H_v = R_bw;
-
-    // Orientation error block (right-multiplicative sign)
-    // If your filter is left-multiplicative, flip the sign.
-    H_theta = eskf_checks::kRightMultiplicative ? skewSymmetric(v_b)
-                                                : -skewSymmetric(v_b);
-}
-
-// Central finite difference for the two 3x3 blocks
-inline void buildNumericalJacobianBlocks(
-    const Eigen::Quaterniond& q_nom,
-    const Eigen::Vector3d& v_world,
-    double h,
-    Eigen::Matrix3d& H_v_fd,
-    Eigen::Matrix3d& H_theta_fd)
-{
-    using namespace eskf_checks;
-
-    // --- Orientation block: columns are partials wrt [dθx, dθy, dθz]
-    for (int k = 0; k < 3; ++k) {
-        Eigen::Vector3d e = Eigen::Vector3d::Zero(); e(k) = h;
-
-        const Eigen::Quaterniond q_plus  = applyAttitudePerturb(q_nom,  e);
-        const Eigen::Quaterniond q_minus = applyAttitudePerturb(q_nom, -e);
-
-        const Eigen::Vector3d h_plus  = meas_body_velocity(q_plus,  v_world);
-        const Eigen::Vector3d h_minus = meas_body_velocity(q_minus, v_world);
-
-        H_theta_fd.col(k) = (h_plus - h_minus) / (2.0 * h);
-    }
-
-    // --- Velocity block: because h = R_bw * v, vary v_world directly
-    const Eigen::Matrix3d R_bw = q_nom.conjugate().toRotationMatrix();
-    // Analytical expectation: H_v_fd ≡ R_bw
-    H_v_fd = R_bw;
-
-    // If you want to purely finite-difference H_v as well, uncomment:
-    // for (int k = 0; k < 3; ++k) {
-    //     Eigen::Vector3d e = Eigen::Vector3d::Zero(); e(k) = h;
-    //     Eigen::Vector3d h_plus  = meas_body_velocity(q_nom, v_world + e);
-    //     Eigen::Vector3d h_minus = meas_body_velocity(q_nom, v_world - e);
-    //     H_v_fd.col(k) = (h_plus - h_minus) / (2.0 * h);
-    // }
-}
-
-// Call this from your update function before using H (or from a debug path)
-inline void checkWheelVelocityJacobian(
-    const Eigen::Quaterniond& q_nom,
-    const Eigen::Vector3d& v_world,
-    double h = 1e-6)
-{
-    Eigen::Matrix3d H_v_ana, H_th_ana;
-    buildAnalyticalJacobianBlocks(q_nom, v_world, H_v_ana, H_th_ana);
-
-    Eigen::Matrix3d H_v_fd, H_th_fd;
-    buildNumericalJacobianBlocks(q_nom, v_world, h, H_v_fd, H_th_fd);
-
-    const double v_err_norm  = (H_v_fd  - H_v_ana).norm();
-    const double th_err_norm = (H_th_fd - H_th_ana).norm();
-
-    // std::cout << std::fixed << std::setprecision(6);
-    std::cout << "[Jacobian check] ||Hv_fd - Hv_ana||  = " << v_err_norm  << "\n";
-    std::cout << "[Jacobian check] ||Hth_fd - Hth_ana||= " << th_err_norm << "\n";
-
-    // Quick sign diagnostic for orientation block
-    const double th_err_flip = (H_th_fd + H_th_ana).norm();
-    if (th_err_norm > 1e-5 && th_err_flip < th_err_norm) {
-        std::cout << "  -> Orientation block looks sign-flipped vs. your convention.\n";
-        std::cout << "     Try toggling eskf_checks::kRightMultiplicative.\n";
-    }
-}
-
 
 // ---------------- Configuration and State Structures ----------------
 /**
@@ -222,8 +93,6 @@ struct FilterConfig {
     double zupt_minimum_duration = 1.5;         // seconds
     size_t zupt_minimum_samples = 120;          // samples
     double wheel_data_timeout = 0.5;             // seconds
-    double zupt_velocity_noise_std = 0.02;      // m/s
-    double zupt_bias_nudging_factor = 0.03;     // dimensionless
 
     // Non-holonomic constraint parameters
     double nhc_velocity_threshold = 0.1;         // m/s
@@ -288,14 +157,6 @@ struct GpsMeasurement {
     bool has_position_fix = true;
 };
 
-
-struct InitCheckReport {
-    bool ok = false;
-    double score = 0.0;              // 0~1，越大越好
-    std::string summary;             // 一句话结论
-    std::vector<std::string> details;// 逐项检查结果
-};
-
 // ---------------- Error-State Kalman Filter Class ----------------
 class ErrorStateKalmanFilter {
 public:
@@ -314,9 +175,6 @@ public:
     // Configuration modifiers
     void setWheelSpeedScaleFactor(double scale_factor);
     void setWheelToImuTransform(const Eigen::Isometry3d& transform);
-
-    // 在初始化完成后调用；也可以在外部拿到report调试
-    bool validateInitialization(InitCheckReport* report = nullptr) const;
     
     // Prediction step with IMU measurements
     void predictIMU(double timestamp, 
@@ -342,21 +200,12 @@ private:
     // Static initialization procedure
     void performStaticInitialization_();
     
-    // Zero-velocity update
-    void applyZeroVelocityUpdate_();
-    
-    // Bias nudging during static periods
-    void nudgeBiasesDuringStaticPeriod_();
-    
-    // Non-holonomic constraint enforcement
-    void applyNonHolonomicConstraints_();
-    
     // Static detection and window management
     void updateImuStaticDetection_(double timestamp,
                                    const Eigen::Vector3d& gyroscope_raw,
                                    const Eigen::Vector3d& accelerometer_raw);
     void updateWheelStaticDetection_(double timestamp, bool is_wheel_static);
-    void tryTriggerInitializationOrZupt_(double current_timestamp);
+    void tryTriggerInitialization(double current_timestamp);
     void clearInitializationBuffer_();
     void clearStaticWindow_();
     
@@ -452,7 +301,7 @@ inline void ErrorStateKalmanFilter::predictIMU(
     updateImuStaticDetection_(timestamp, gyroscope_raw, accelerometer_raw);
 
     if (!is_initialized_) {
-        tryTriggerInitializationOrZupt_(timestamp);
+        tryTriggerInitialization(timestamp);
         nominal_state_.timestamp = timestamp;
         return;
     }
@@ -514,11 +363,6 @@ inline void ErrorStateKalmanFilter::predictIMU(
     const Eigen::Matrix3d R_wT_wheel_now = qk.toRotationMatrix();
     propagateCovariance_(dt, f_wheel, R_wT_wheel_now, w_wheel);
 
-    // 8) Non-holonomic constraints (consider gating by small |roll|, |pitch|, |w_z|)
-    applyNonHolonomicConstraints_();
-
-    // 9) ZUPT trigger
-    tryTriggerInitializationOrZupt_(timestamp);
 }
 
 
@@ -527,7 +371,7 @@ inline double ErrorStateKalmanFilter::updateWheelSpeed(double timestamp, double 
     const bool is_wheel_static = std::abs(wheel_last_scaled_speed_) < config_.zupt_velocity_threshold;
     updateWheelStaticDetection_(timestamp, is_wheel_static);
 
-    tryTriggerInitializationOrZupt_(timestamp);
+    tryTriggerInitialization(timestamp);
     if (!is_initialized_) return 0.0;
 
     // Rotation: world -> wheel/body
@@ -629,7 +473,7 @@ inline void ErrorStateKalmanFilter::propagateCovariance_(double time_step,
     state_transition_matrix.block<3, 3>(3, 12) = -rotation_world_T_wheel * rotation_wheel_T_imu_;
     state_transition_matrix.block<3, 3>(6, 9) = -rotation_wheel_T_imu_;
     // 姿态误差自身动力学：dot(dtheta) = -skew(omega_wheel) * dtheta - R_wi*dbg - R_wi*ng
-    // state_transition_matrix.block<3, 3>(6, 6) = -skewSymmetric(angular_velocity_wheel);
+    state_transition_matrix.block<3, 3>(6, 6) = -skewSymmetric(angular_velocity_wheel);
 
     // Noise jacobian (IMU noise in IMU frame)
     noise_jacobian.block<3, 3>(6, 0) = -rotation_wheel_T_imu_;
@@ -749,100 +593,6 @@ inline void ErrorStateKalmanFilter::performStaticInitialization_() {
     has_previous_angular_velocity_ = false;
 }
 
-
-inline void ErrorStateKalmanFilter::applyZeroVelocityUpdate_() {
-    Eigen::Matrix<double, 3, ErrorState::STATE_DIMENSION> measurement_jacobian = 
-        Eigen::Matrix<double, 3, ErrorState::STATE_DIMENSION>::Zero();
-    measurement_jacobian.block<3, 3>(0, 3) = Eigen::Matrix3d::Identity();
-    
-    const Eigen::Matrix3d measurement_noise_covariance = 
-        (config_.zupt_velocity_noise_std * config_.zupt_velocity_noise_std) * Eigen::Matrix3d::Identity();
-    const Eigen::Matrix3d innovation_covariance = 
-        measurement_jacobian * error_state_.covariance * measurement_jacobian.transpose() + measurement_noise_covariance;
-    const Eigen::Matrix<double, ErrorState::STATE_DIMENSION, 3> kalman_gain = 
-        error_state_.covariance * measurement_jacobian.transpose() * innovation_covariance.inverse();
-    
-    const Eigen::Vector3d innovation = -nominal_state_.velocity;
-    error_state_.vector += kalman_gain * innovation;
-    error_state_.covariance = (Eigen::Matrix<double, ErrorState::STATE_DIMENSION, ErrorState::STATE_DIMENSION>::Identity() - 
-                             kalman_gain * measurement_jacobian) * error_state_.covariance;
-    
-    injectAndResetErrorState_();
-}
-
-inline void ErrorStateKalmanFilter::nudgeBiasesDuringStaticPeriod_() {
-    if (zupt_acceleration_buffer_.empty() || zupt_gyroscope_buffer_.empty()) {
-        return;
-    }
-    
-    Eigen::Vector3d acceleration_mean = Eigen::Vector3d::Zero();
-    Eigen::Vector3d gyroscope_mean = Eigen::Vector3d::Zero();
-    
-    for (const auto& accel : zupt_acceleration_buffer_) {
-        acceleration_mean += accel;
-    }
-    for (const auto& gyro : zupt_gyroscope_buffer_) {
-        gyroscope_mean += gyro;
-    }
-    
-    acceleration_mean /= static_cast<double>(zupt_acceleration_buffer_.size());
-    gyroscope_mean /= static_cast<double>(zupt_gyroscope_buffer_.size());
-
-    // Apply exponential smoothing to bias estimates
-    const double alpha = config_.zupt_bias_nudging_factor;
-    nominal_state_.gyroscope_bias = (1.0 - alpha) * nominal_state_.gyroscope_bias + alpha * gyroscope_mean;
-    
-    const Eigen::Vector3d gravity_world_normalized = config_.gravity_world.normalized();
-    const Eigen::Vector3d negative_acceleration_normalized = (-acceleration_mean).normalized();
-    const Eigen::Quaterniond orientation_imu_T_world = 
-        Eigen::Quaterniond::FromTwoVectors(negative_acceleration_normalized, gravity_world_normalized);
-    const Eigen::Matrix3d rotation_world_T_imu = orientation_imu_T_world.toRotationMatrix().transpose();
-    const Eigen::Vector3d accelerometer_bias_estimate = acceleration_mean + rotation_world_T_imu * config_.gravity_world;
-    
-    nominal_state_.accelerometer_bias = (1.0 - alpha) * nominal_state_.accelerometer_bias + alpha * accelerometer_bias_estimate;
-}
-
-inline void ErrorStateKalmanFilter::applyNonHolonomicConstraints_() {
-    if (!is_initialized_ || nominal_state_.velocity.norm() < config_.nhc_velocity_threshold) {
-        return;
-    }
-
-    const Eigen::Matrix3d rotation_wheel_T_world = nominal_state_.orientation.conjugate().toRotationMatrix();
-    const Eigen::Vector3d velocity_in_wheel_frame = rotation_wheel_T_world * nominal_state_.velocity;
-
-    // Measurement model: lateral and vertical velocities should be zero
-    Eigen::Vector2d predicted_lateral_velocities;
-    predicted_lateral_velocities << velocity_in_wheel_frame.y(), velocity_in_wheel_frame.z();
-    const Eigen::Vector2d innovation = -predicted_lateral_velocities;
-
-    // Jacobian matrix
-    Eigen::Matrix<double, 2, ErrorState::STATE_DIMENSION> measurement_jacobian = 
-        Eigen::Matrix<double, 2, ErrorState::STATE_DIMENSION>::Zero();
-    
-    measurement_jacobian.block<1, 3>(0, 3) = Eigen::RowVector3d(0, 1, 0) * rotation_wheel_T_world;
-    measurement_jacobian.block<1, 3>(1, 3) = Eigen::RowVector3d(0, 0, 1) * rotation_wheel_T_world;
-    measurement_jacobian.block<1, 3>(0, 6) = Eigen::RowVector3d(0, 1, 0) * skewSymmetric(velocity_in_wheel_frame);
-    measurement_jacobian.block<1, 3>(1, 6) = Eigen::RowVector3d(0, 0, 1) * skewSymmetric(velocity_in_wheel_frame);
-
-    // Kalman filter update
-    const Eigen::Matrix2d measurement_noise_covariance = 
-        Eigen::Matrix2d::Identity() * (config_.nhc_lateral_noise_std * config_.nhc_lateral_noise_std);
-    const Eigen::Matrix2d innovation_covariance = 
-        measurement_jacobian * error_state_.covariance * measurement_jacobian.transpose() + measurement_noise_covariance;
-    const Eigen::Matrix<double, ErrorState::STATE_DIMENSION, 2> kalman_gain = 
-        error_state_.covariance * measurement_jacobian.transpose() * innovation_covariance.inverse();
-
-    error_state_.vector += kalman_gain * innovation;
-    
-    // Joseph form update for numerical stability
-    const Eigen::Matrix<double, ErrorState::STATE_DIMENSION, ErrorState::STATE_DIMENSION> identity_minus_kh = 
-        Eigen::Matrix<double, ErrorState::STATE_DIMENSION, ErrorState::STATE_DIMENSION>::Identity() - kalman_gain * measurement_jacobian;
-    error_state_.covariance = identity_minus_kh * error_state_.covariance * identity_minus_kh.transpose() + 
-                             kalman_gain * measurement_noise_covariance * kalman_gain.transpose();
-
-    injectAndResetErrorState_();
-}
-
 inline void ErrorStateKalmanFilter::updateImuStaticDetection_(double timestamp,
                                                               const Eigen::Vector3d& gyroscope_raw,
                                                               const Eigen::Vector3d& accelerometer_raw) {
@@ -901,7 +651,7 @@ inline void ErrorStateKalmanFilter::updateWheelStaticDetection_(double timestamp
     }
 }
 
-inline void ErrorStateKalmanFilter::tryTriggerInitializationOrZupt_(double current_timestamp) {
+inline void ErrorStateKalmanFilter::tryTriggerInitialization(double current_timestamp) {
     if (static_window_start_time_ < 0) {
         return;
     }
@@ -920,8 +670,6 @@ inline void ErrorStateKalmanFilter::tryTriggerInitializationOrZupt_(double curre
         clearInitializationBuffer_();
         clearStaticWindow_();
     } else {
-        applyZeroVelocityUpdate_();
-        nudgeBiasesDuringStaticPeriod_();
         clearStaticWindow_();
     }
 }
@@ -980,15 +728,6 @@ inline FilterConfig FilterConfig::loadFromYaml(const YAML::Node& config_node) {
             config.zupt_acceleration_threshold = zupt["acceleration_threshold"].as<double>(config.zupt_acceleration_threshold);
             config.zupt_minimum_duration = zupt["minimum_duration"].as<double>(config.zupt_minimum_duration);
             config.zupt_minimum_samples = zupt["minimum_samples"].as<size_t>(config.zupt_minimum_samples);
-            config.zupt_velocity_noise_std = zupt["velocity_noise_std"].as<double>(config.zupt_velocity_noise_std);
-            config.zupt_bias_nudging_factor = zupt["bias_nudging_factor"].as<double>(config.zupt_bias_nudging_factor);
-        }
-        
-        // Load non-holonomic constraint parameters
-        if (config_node["nhc"]) {
-            const auto& nhc = config_node["nhc"];
-            config.nhc_velocity_threshold = nhc["velocity_threshold"].as<double>(config.nhc_velocity_threshold);
-            config.nhc_lateral_noise_std = nhc["lateral_noise_std"].as<double>(config.nhc_lateral_noise_std);
         }
         
         // Load lever-arm compensation setting
@@ -1002,155 +741,6 @@ inline FilterConfig FilterConfig::loadFromYaml(const YAML::Node& config_node) {
     return config;
 }
 
-inline bool ErrorStateKalmanFilter::validateInitialization(InitCheckReport* report) const {
-    InitCheckReport rep;
-    auto add = [&](const std::string& s){ rep.details.push_back(s); };
-
-    if (!is_initialized_) {
-        rep.ok = false;
-        rep.summary = "未初始化：is_initialized_ = false";
-        if (report) *report = rep;
-        return false;
-    }
-
-    // 0) 取姿态与常用矩阵
-    const Eigen::Matrix3d R_world_T_wheel = nominal_state_.orientation.toRotationMatrix();
-    const Eigen::Matrix3d R_wheel_T_world = R_world_T_wheel.transpose();
-
-    // 由外参得到 IMU与Wheel关系
-    const Eigen::Matrix3d R_wheel_T_imu = rotation_wheel_T_imu_;
-    const Eigen::Matrix3d R_imu_T_wheel = R_wheel_T_imu.transpose();
-
-    // 1) 通过 wheel 姿态 + 外参 推回 world_T_imu（路径A）
-    const Eigen::Matrix3d R_world_T_imu_via_extrinsic = R_world_T_wheel * R_imu_T_wheel;
-
-    // 2) 通过重力对齐（路径B）：由初始化窗口的加速度均值恢复 world_T_imu
-    Eigen::Vector3d a_mean = cached_init_accel_mean_;
-    if (a_mean.isZero(1e-12)) {
-        // 如果没缓存，退化用当前ZUPT缓冲均值或放弃此项
-        add("警告：未缓存初始化期加速度均值，跳过重力对齐一致性对比。");
-    }
-    Eigen::Matrix3d R_world_T_imu_via_gravity = R_world_T_imu_via_extrinsic; // 默认给个值防未用
-    bool gravity_path_valid = false;
-    if (!a_mean.isZero(1e-12)) {
-        const Eigen::Vector3d g_w_hat = config_.gravity_world.normalized();
-        const Eigen::Vector3d minus_a_hat = (-a_mean).normalized();
-        Eigen::Quaterniond q_world_T_imu =
-            Eigen::Quaterniond::FromTwoVectors(minus_a_hat, g_w_hat).normalized();
-        R_world_T_imu_via_gravity = q_world_T_imu.toRotationMatrix();
-        gravity_path_valid = true;
-    }
-
-    // 3) 姿态正交性
-    double ortho_err = (R_world_T_wheel.transpose()*R_world_T_wheel - Eigen::Matrix3d::Identity()).norm();
-    bool ortho_ok = (std::abs(R_world_T_wheel.determinant()-1.0) < 1e-3) && (ortho_err < 1e-3);
-    add("姿态正交性误差 ||R^T R - I|| = " + std::to_string(ortho_err) +
-        (ortho_ok ? " [OK]" : " [BAD]"));
-
-    // 4) 重力方向一致性（在 wheel/imu 中检查）
-    //    先把世界重力转到 IMU：g_imu = R_imu^world * g
-    bool gravity_dir_ok = true;
-    double gravity_angle_deg = 0.0, gravity_mag_err = 0.0;
-    {
-        const Eigen::Matrix3d R_imu_T_world = R_world_T_imu_via_extrinsic.transpose();
-        Eigen::Vector3d g_imu = R_imu_T_world * config_.gravity_world;
-
-        if (!a_mean.isZero(1e-12)) {
-            Eigen::Vector3d a_hat = a_mean.normalized();
-            Eigen::Vector3d minus_g_imu_hat = (-g_imu).normalized(); // 理想应与 a_hat 对齐
-            double cosang = std::clamp(a_hat.dot(minus_g_imu_hat), -1.0, 1.0);
-            gravity_angle_deg = std::acos(cosang) * 180.0 / M_PI;
-            gravity_mag_err = std::abs(a_mean.norm() - config_.gravity_world.norm());
-            gravity_dir_ok = (gravity_angle_deg < 3.0) && (gravity_mag_err < 0.5);
-            add("重力方向夹角 = " + std::to_string(gravity_angle_deg) +
-                " deg, 加速度模长误差 = " + std::to_string(gravity_mag_err) +
-                (gravity_dir_ok ? " [OK]" : " [BAD]"));
-        } else {
-            add("跳过重力一致性：无初始化期加速度均值缓存。");
-        }
-    }
-
-    // 5) 陀螺零偏大小
-    double bg_norm = nominal_state_.gyroscope_bias.norm();
-    bool bg_ok = (bg_norm < 0.02); // 参考阈值
-    add("陀螺零偏范数 = " + std::to_string(bg_norm) + (bg_ok ? " [OK]" : " [BAD]"));
-
-    // 6) 加计零偏大小
-    double ba_norm = nominal_state_.accelerometer_bias.norm();
-    bool ba_ok = (ba_norm < 1.5); // 参考阈值
-    add("加计零偏范数 = " + std::to_string(ba_norm) + (ba_ok ? " [OK]" : " [BAD]"));
-
-    // 7) 外参-重力一致性（两条路径求的 world_T_imu 是否一致）
-    bool extrinsic_consistent = true;
-    double dtheta_ex_deg = 0.0;
-    if (gravity_path_valid) {
-        Eigen::Matrix3d dR = R_world_T_imu_via_extrinsic.transpose() * R_world_T_imu_via_gravity; // imu系下误差
-        double cosang = std::clamp((dR.trace()-1.0)/2.0, -1.0, 1.0);
-        dtheta_ex_deg = std::acos(cosang) * 180.0 / M_PI;
-        extrinsic_consistent = (dtheta_ex_deg < 3.0);
-        add("外参一致性：via_extrinsic 与 via_gravity 的差角 = " +
-            std::to_string(dtheta_ex_deg) + " deg" + (extrinsic_consistent ? " [OK]" : " [BAD]"));
-    }
-
-    // 8) 车辆几何合理性（前向轴与重力夹角应 ~90°）
-    bool wheel_axes_ok = true;
-    {
-        // wheel 前向 x_wheel 在世界系：x_w = R_world_T_wheel * [1,0,0]
-        Eigen::Vector3d x_w = R_world_T_wheel * Eigen::Vector3d::UnitX();
-        Eigen::Vector3d g_w_hat = config_.gravity_world.normalized();
-        double cosang = std::abs(std::clamp(x_w.dot(g_w_hat), -1.0, 1.0));
-        double angle_deg = std::acos(cosang) * 180.0 / M_PI; // 与竖直夹角
-        // 接近 90° 更合理，放宽： [70°, 110°]
-        wheel_axes_ok = (angle_deg > 70.0 && angle_deg < 110.0);
-        add("车辆前向轴与重力夹角 = " + std::to_string(angle_deg) + " deg" +
-            (wheel_axes_ok ? " [OK]" : " [SUSPECT]"));
-    }
-
-    // 9) 初始速度在 wheel 系应接近 0
-    bool v_zero_ok = true;
-    {
-        Eigen::Vector3d v_wheel = R_wheel_T_world * nominal_state_.velocity;
-        double vnorm = v_wheel.norm();
-        v_zero_ok = (vnorm < 0.05);
-        add("静止期初始速度 ‖v_wheel‖ = " + std::to_string(vnorm) + (v_zero_ok ? " [OK]" : " [BAD]"));
-    }
-
-    // 10) 协方差尺度（简单检查）
-    bool cov_ok = true;
-    {
-        double pos_var = error_state_.covariance.block<3,3>(0,0).diagonal().mean();
-        double vel_var = error_state_.covariance.block<3,3>(3,3).diagonal().mean();
-        double att_var = error_state_.covariance.block<3,3>(6,6).diagonal().mean();
-        // 粗阈值：姿态 < (5°)^2 ≈ 0.0076；速度 < 0.2^2 = 0.04；位置 < 1^2 = 1
-        cov_ok = (att_var < 0.01 && vel_var < 0.1 && pos_var < 4.0);
-        add("协方差均值: pos=" + std::to_string(pos_var) +
-            ", vel=" + std::to_string(vel_var) +
-            ", att=" + std::to_string(att_var) +
-            (cov_ok ? " [OK]" : " [SUSPECT]"));
-    }
-
-    // 汇总：一个简单的“得分”/门限
-    int pass_cnt = 0, total = 0;
-    auto count = [&](bool b){ total++; if (b) pass_cnt++; };
-
-    count(ortho_ok);
-    count(gravity_dir_ok || !gravity_path_valid);
-    count(bg_ok);
-    count(ba_ok);
-    count(extrinsic_consistent || !gravity_path_valid);
-    count(wheel_axes_ok);
-    count(v_zero_ok);
-    count(cov_ok);
-
-    rep.score = total ? (double)pass_cnt / (double)total : 0.0;
-    rep.ok = rep.score > 0.75; // 通过阈值可调
-    rep.summary = rep.ok ?
-        "初始化校验通过，整体一致性良好（score=" + std::to_string(rep.score) + ")."
-      : "初始化校验未通过/可疑（score=" + std::to_string(rep.score) + "). 建议检查外参与静止窗口数据。";
-
-    if (report) *report = rep;
-    return rep.ok;
-}
 
 
 } // namespace eskf
