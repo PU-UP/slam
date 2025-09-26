@@ -20,22 +20,15 @@
  *  - Wheel: Vehicle frame located at differential drive center
  *  - IMU (i): Sensor frame at arbitrary location on the robot
  * 
- *  frameA_T_frameB: from frameB to frameA !!!!!
+ *  rotation_frameA_T_frameB: frameB -> frameA !!!!!
  * 
  * State Vector (15-dimensional):
  *  - Position: p_w (3D, world frame)
  *  - Velocity: v_w (3D, world frame) 
- *  - Orientation: q_wheel (quaternion, world->wheel transformation)
+ *  - attitude: q_wheel (quaternion, wheel->world transformation)
  *  - Gyroscope bias: bg_i (3D, IMU frame)
  *  - Accelerometer bias: ba_i (3D, IMU frame)
  * 
- * Key Features:
- * - Automatic initialization during static periods
- * - Zero-velocity update (ZUPT) for drift correction
- * - Non-holonomic constraints for ground vehicles
- * - Wheel speed measurements for forward velocity updates
- * - IMU bias estimation and compensation
- * - Lever-arm effect compensation (optional)
  */
 
 namespace eskf {
@@ -112,13 +105,13 @@ struct FilterConfig {
 /**
  * Nominal state vector (PVQ + biases).
  * 
- * Standard navigation state format: Position, Velocity, Orientation (Quaternion) + IMU biases
+ * Standard navigation state format: Position, Velocity, Attitude (Quaternion) + IMU biases
  */
 struct NominalState {
     double timestamp = 0.0;
     Eigen::Vector3d position = Eigen::Vector3d::Zero();          // world frame (P)
     Eigen::Vector3d velocity = Eigen::Vector3d::Zero();          // world frame (V)
-    Eigen::Quaterniond orientation = Eigen::Quaterniond::Identity(); // world->wheel (Q)
+    Eigen::Quaterniond attitude = Eigen::Quaterniond::Identity(); // wheel->world (Q)
     Eigen::Vector3d gyroscope_bias = Eigen::Vector3d::Zero();     // IMU frame (bg)
     Eigen::Vector3d accelerometer_bias = Eigen::Vector3d::Zero(); // IMU frame (ba)
 };
@@ -331,7 +324,7 @@ inline void ErrorStateKalmanFilter::predictIMU(
 
     // 4) Midpoint integration for attitude
     // q_k represents world_T_wheel (R_wT_w)
-    const Eigen::Quaterniond qk = nominal_state_.orientation;
+    const Eigen::Quaterniond qk = nominal_state_.attitude;
 
     // Small-angle quaternion update helper (right-multiplicative)
     auto Expq = [](const Eigen::Vector3d& phi)->Eigen::Quaterniond {
@@ -356,7 +349,7 @@ inline void ErrorStateKalmanFilter::predictIMU(
     // 6) Integrate state with midpoint acceleration
     nominal_state_.position   += nominal_state_.velocity * dt + 0.5 * a_world * dt * dt;
     nominal_state_.velocity   += a_world * dt;
-    nominal_state_.orientation = (qk * Expq(w_mid * dt)).normalized();
+    nominal_state_.attitude = (qk * Expq(w_mid * dt)).normalized();
 
     // 7) Propagate covariance (F, G built at current sample are fine;
     //    passing acceleration_wheel as the specific force is consistent)
@@ -371,16 +364,18 @@ inline double ErrorStateKalmanFilter::updateWheelSpeed(double timestamp, double 
     const bool is_wheel_static = std::abs(wheel_last_scaled_speed_) < config_.zupt_velocity_threshold;
     updateWheelStaticDetection_(timestamp, is_wheel_static);
 
+    if (is_wheel_static) {
+        wheel_last_scaled_speed_ = 0.0;
+    }
+
     tryTriggerInitialization(timestamp);
     if (!is_initialized_) return 0.0;
 
     // Rotation: world -> wheel/body
-    const Eigen::Matrix3d R_bw = nominal_state_.orientation.conjugate().toRotationMatrix();
+    const Eigen::Matrix3d R_bw = nominal_state_.attitude.conjugate().toRotationMatrix();
 
     // Predicted measurement: wheel/body-frame velocity
     const Eigen::Vector3d v_b = R_bw * nominal_state_.velocity;  // [vbx, vby, vbz]^T
-
-    // checkWheelVelocityJacobian(nominal_state_.orientation, nominal_state_.velocity, 1e-6);
 
     // Build 3D measurement vector: encoder for x; pseudo-measurements for y,z as 0
     Eigen::Vector3d z;
@@ -396,9 +391,8 @@ inline double ErrorStateKalmanFilter::updateWheelSpeed(double timestamp, double 
     // ∂(R_bw * v_w)/∂(velocity error) = R_bw
     H.block<3,3>(0, 3) = R_bw;
 
-    // ∂(R_bw * v_w)/∂(orientation error) ≈ skew(v_b)
-    // (Sign convention matches your existing scalar-x update.)
-    H.block<3,3>(0, 6) = skewSymmetric(v_b);
+    // ∂(R_bw * v_w)/∂(attitude error) ≈ -skew(v_b)
+    H.block<3,3>(0, 6) = -skewSymmetric(v_b);
 
     // Measurement noise (per-axis). Tune these:
     //  - x: from wheel speed sensor std
@@ -411,8 +405,8 @@ inline double ErrorStateKalmanFilter::updateWheelSpeed(double timestamp, double 
     // const double sz = (config_.wheel_vertical_zero_vel_noise_std > 0.0)
     //                     ? config_.wheel_vertical_zero_vel_noise_std
     //                     : 3.0 * sx;
-    const double sy = 0; 
-    const double sz = 0;
+    const double sy = 1e-6; 
+    const double sz = 1e-6;
 
     Eigen::Matrix3d R;
     R.setZero();
@@ -430,13 +424,13 @@ inline double ErrorStateKalmanFilter::updateWheelSpeed(double timestamp, double 
     error_state_.vector += K * y;
 
     // Standard form:
-    error_state_.covariance =
-        (Eigen::Matrix<double, ErrorState::STATE_DIMENSION, ErrorState::STATE_DIMENSION>::Identity() - K * H) * P;
+    // error_state_.covariance =
+    //     (Eigen::Matrix<double, ErrorState::STATE_DIMENSION, ErrorState::STATE_DIMENSION>::Identity() - K * H) * P;
 
     // If you prefer Joseph form for extra numerical stability, use this instead:
-    // Eigen::Matrix<double, ErrorState::STATE_DIMENSION, ErrorState::STATE_DIMENSION> I;
-    // I.setIdentity();
-    // error_state_.covariance = (I - K * H) * P * (I - K * H).transpose() + K * R * K.transpose();
+    Eigen::Matrix<double, ErrorState::STATE_DIMENSION, ErrorState::STATE_DIMENSION> I;
+    I.setIdentity();
+    error_state_.covariance = (I - K * H) * P * (I - K * H).transpose() + K * R * K.transpose();
 
     injectAndResetErrorState_();
 
@@ -508,14 +502,14 @@ inline void ErrorStateKalmanFilter::injectAndResetErrorState_() {
     // Extract error state components
     const Eigen::Vector3d position_error = error_state_.vector.block<3, 1>(0, 0);
     const Eigen::Vector3d velocity_error = error_state_.vector.block<3, 1>(3, 0);
-    const Eigen::Vector3d orientation_error = error_state_.vector.block<3, 1>(6, 0);
+    const Eigen::Vector3d attitude_error = error_state_.vector.block<3, 1>(6, 0);
     const Eigen::Vector3d gyroscope_bias_error = error_state_.vector.block<3, 1>(9, 0);
     const Eigen::Vector3d accelerometer_bias_error = error_state_.vector.block<3, 1>(12, 0);
 
     // Inject errors into nominal state
     nominal_state_.position += position_error;
     nominal_state_.velocity += velocity_error;
-    nominal_state_.orientation = quaternionRightUpdate(nominal_state_.orientation, orientation_error);
+    nominal_state_.attitude = quaternionRightUpdate(nominal_state_.attitude, attitude_error);
     nominal_state_.gyroscope_bias += gyroscope_bias_error;
     nominal_state_.accelerometer_bias += accelerometer_bias_error;
 
@@ -575,7 +569,7 @@ inline void ErrorStateKalmanFilter::performStaticInitialization_() {
     const Eigen::Matrix3d R_imu_T_wheel = R_wheel_T_imu.transpose();
 
     const Eigen::Matrix3d R_world_T_wheel = R_world_T_imu * R_imu_T_wheel;
-    nominal_state_.orientation = Eigen::Quaterniond(R_world_T_wheel).normalized();
+    nominal_state_.attitude = Eigen::Quaterniond(R_world_T_wheel).normalized();
 
     // 6) 速度清零
     nominal_state_.velocity.setZero();

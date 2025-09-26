@@ -55,4 +55,4 @@ eskf:
     minimum_samples: 200                  # samples
   
   # Lever-arm compensation
-  enable_lever_arm_compensation: true
+  enable_lever_arm_compensation: false

@@ -264,7 +264,7 @@ int main(int argc, char** argv) {
             fout << S.timestamp << ","
                      << S.position.x() << "," << S.position.y() << "," << S.position.z() << ","
                      << S.velocity.x() << "," << S.velocity.y() << "," << S.velocity.z() << ","
-                     << S.orientation.w() << "," << S.orientation.x() << "," << S.orientation.y() << "," << S.orientation.z()
+                     << S.attitude.w() << "," << S.attitude.x() << "," << S.attitude.y() << "," << S.attitude.z()
                      << "\n";
         } else {
             // 未初始化期间不输出pose，这里可打印监控行（可选）
