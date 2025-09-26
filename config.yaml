@@ -28,31 +28,21 @@ paths:
 
 # ESKF (Error-State Kalman Filter) Configuration
 eskf:
-  # Gravity vector in world frame (ENU convention), not used for now
-  gravity_world:
-    x: 0.0
-    y: 0.0
-    z: -9.81
+  # Noise parameters (square root of power spectral density)
+  noise:
+    sigma_acc: 0.8                      # m/s²/√Hz (accelerometer noise)
+    sigma_gyro: 0.02                   # rad/s/√Hz (gyroscope noise)
+    sigma_ba: 0.0005                    # m/s²/√Hz (accelerometer bias random walk)
+    sigma_bg: 0.0002                    # rad/s/√Hz (gyroscope bias random walk)
+    sigma_wheel_vx: 0.05                # m/s (wheel forward speed noise)
+    sigma_wheel_plane: 0.02            # m/s (wheel lateral/vertical constraint noise)
   
-  # IMU noise parameters (square root of power spectral density)
-  imu_noise:
-    gyroscope_noise_density: 8e-4     # rad/s/√Hz
-    accelerometer_noise_density: 2.5e-1  # m/s²/√Hz
-    gyroscope_random_walk: 5.0e-5        # rad/s²/√Hz
-    accelerometer_random_walk: 1.0e-3    # m/s³/√Hz  
-  # Wheel speed measurement parameters
-  wheel_speed:
-    noise_std: 0.0001                    # m/s
-    scale_factor: 1.0                    # dimensionless
-    timeout: 0.5                         # seconds
+  # Physical constants
+  gravity: 9.81                         # m/s²
   
-  # Zero-velocity update (ZUPT) detection parameters
-  zupt:
-    velocity_threshold: 0.01             # m/s
-    gyroscope_threshold: 0.02            # rad/s
-    acceleration_threshold: 0.06         # m/s²
-    minimum_duration: 4                # seconds
-    minimum_samples: 200                  # samples
+  # Static initialization parameters
+  init:
+    min_samples: 200                    # minimum samples for static initialization (~2s at 100Hz)
+    max_gyro: 0.05                      # rad/s (maximum gyro magnitude for static init)
+    acc_std_thresh: 0.1                 # m/s² (maximum acceleration std for static init)
   
-  # Lever-arm compensation
-  enable_lever_arm_compensation: false

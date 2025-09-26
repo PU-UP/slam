@@ -154,28 +154,14 @@ int main(int argc, char** argv) {
     auto qi = data_loader.imuQueue();
     auto qo = data_loader.odomQueue();
 
-    using namespace eskf;
-    // 2) 配置 ESKF - 从配置文件加载
-    FilterConfig eskf_config;
-    
-    // 首先从配置文件加载ESKF参数
-    try {
-        YAML::Node main_config_file = YAML::LoadFile(config_path);
-        if (main_config_file["eskf"]) {
-            eskf_config = FilterConfig::loadFromYaml(main_config_file["eskf"]);
-            std::cout << "ESKF配置已从配置文件加载" << std::endl;
-        } else {
-            std::cout << "未找到ESKF配置，使用默认参数" << std::endl;
-        }
-    } catch (const YAML::Exception& e) {
-        std::cerr << "加载ESKF配置时出错: " << e.what() << std::endl;
-        std::cout << "使用默认ESKF配置" << std::endl;
-    }
+    // 使用配置文件创建ESKF实例
+    Eigen::Isometry3d T_iw = Eigen::Isometry3d(calibration_data.extrinsic_body_T_wheel.transform.inverse());
+    Eigen::Quaterniond q_iw(T_iw.rotation());
+    Eigen::Vector3d t_iw = T_iw.translation();
 
-    // 外参：T_bi（body<-imu），从标定数据设置
-    eskf_config.transform_wheel_T_imu = Eigen::Isometry3d(calibration_data.extrinsic_body_T_wheel.transform.inverse());
-    
-    ErrorStateKalmanFilter filter(eskf_config);
+    std::cout << "Creating ESKF from configuration file..." << std::endl;
+    eskf filter = eskf::fromConfigFile(config_path, q_iw, t_iw);
+    std::cout << "ESKF created successfully with parameters from config file" << std::endl;
 
     std::priority_queue<Event, std::vector<Event>, CmpEvent> pq;
     if (!qi.empty()) { auto m = qi.front(); qi.pop(); pq.push({Event::IMU,  m->timestamp, m, {}}); }
@@ -224,14 +210,15 @@ int main(int argc, char** argv) {
 
         if (ev.type == Event::IMU) {
             auto m = ev.imu;
-            // IMU 原始量（注意：这里默认 IMU 数据在 IMU系 i）
+            // // IMU 原始量（注意：这里默认 IMU 数据在 IMU系 i）
             Eigen::Vector3d gyroscope_raw(m->gx, m->gy, m->gz);
             Eigen::Vector3d accelerometer_raw(m->ax, m->ay, m->az);
-            filter.predictIMU(m->timestamp, gyroscope_raw, accelerometer_raw);
+            filter.feedimu(m->timestamp, accelerometer_raw, gyroscope_raw);
         } else {
             auto m = ev.odom;
             // 轮速：使用 twist.linear.x 作为前向速度（与 wheel-x 对齐）
-            filter.updateWheelSpeed(m->timestamp, m->vx);
+            // filter.updateWheelSpeed(m->timestamp, m->vx);
+            filter.feedwheelvelocity(m->timestamp, m->vx);
         }
 
         // 定期打印进度和当前状态
@@ -240,12 +227,12 @@ int main(int argc, char** argv) {
             std::cout << "进度: " << std::fixed << std::setprecision(1) << progress_percent 
                       << "% (" << processed_count << "/" << total_events << ")";
             
-            if (filter.isInitialized()) {
-                const auto& S = filter.getNominalState();
+            const auto& S = filter.getNominalState();
+            if (S.initialized) {
                 std::cout << " | 位置: [" << std::setprecision(3) 
-                          << S.position.x() << ", " << S.position.y() << ", " << S.position.z() << "]"
+                          << S.p.x() << ", " << S.p.y() << ", " << S.p.z() << "]"
                           << " | 速度: [" << std::setprecision(3)
-                          << S.velocity.x() << ", " << S.velocity.y() << ", " << S.velocity.z() << "]";
+                          << S.v.x() << ", " << S.v.y() << ", " << S.v.z() << "]";
             } else {
                 std::cout << " | 状态: 未初始化";
             }
@@ -259,12 +246,13 @@ int main(int argc, char** argv) {
             last_progress_time = ev.t;
         }
 
-        if (filter.isInitialized()) {
+        const auto& S = filter.getNominalState();
+        if (S.initialized) {
             const auto& S = filter.getNominalState();
             fout << S.timestamp << ","
-                     << S.position.x() << "," << S.position.y() << "," << S.position.z() << ","
-                     << S.velocity.x() << "," << S.velocity.y() << "," << S.velocity.z() << ","
-                     << S.attitude.w() << "," << S.attitude.x() << "," << S.attitude.y() << "," << S.attitude.z()
+                     << S.p.x() << "," << S.p.y() << "," << S.p.z() << ","
+                     << S.v.x() << "," << S.v.y() << "," << S.v.z() << ","
+                     << S.q.w() << "," << S.q.x() << "," << S.q.y() << "," << S.q.z()
                      << "\n";
         } else {
             // 未初始化期间不输出pose，这里可打印监控行（可选）
@@ -285,13 +273,13 @@ int main(int argc, char** argv) {
         std::cout << "\n数据处理完成，共处理 " << processed_count << " 个事件" << std::endl;
     }
 
-    if (!filter.isInitialized()) {
-        std::cerr << "警告：未检测到足够长的静止段，未完成初始化。\n";
-    } else {
-        const auto& S = filter.getNominalState();
-        std::cout << "# Final p: " << S.position.transpose() << "\n";
-        std::cout << "# Final v: " << S.velocity.transpose() << "\n";
-    }
+    // if (!filter.isInitialized()) {
+    //     std::cerr << "警告：未检测到足够长的静止段，未完成初始化。\n";
+    // } else {
+    //     const auto& S = filter.getNominalState();
+    //     std::cout << "# Final p: " << S.position.transpose() << "\n";
+    //     std::cout << "# Final v: " << S.velocity.transpose() << "\n";
+    // }
 
     std::cout << "结果已保存到: " << out_path << std::endl;
     return 0;
