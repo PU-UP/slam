@@ -41,6 +41,16 @@ public:
     double init_max_gyro = 0.05;         // rad/s
     double init_acc_std_thresh = 0.1;    // m/s^2
 
+    // Simple zero-velocity updates (ZUPT) when detected static
+    bool   use_zupt = false;
+    double zupt_max_gyro = 0.08;         // rad/s
+    double zupt_acc_norm_thresh = 0.15;  // | |a| - g |
+    double zupt_sigma_v = 0.02;          // m/s
+
+    // Robust gating (chi-square) to avoid blow-ups
+    double gate_chi2_wheel = 25.0;     // ~95% in 3D
+    double gate_chi2_zupt  = 25.0;
+
     // 从YAML节点加载参数
     static Params fromYaml(const YAML::Node& node) {
       Params params;
@@ -60,10 +70,18 @@ public:
       }
       
       if (node["init"]) {
-        const auto& init = node["init"];
+        const auto& init = node["init"]; 
         if (init["min_samples"]) params.init_min_samples = init["min_samples"].as<int>();
         if (init["max_gyro"]) params.init_max_gyro = init["max_gyro"].as<double>();
         if (init["acc_std_thresh"]) params.init_acc_std_thresh = init["acc_std_thresh"].as<double>();
+      }
+
+      if (node["zupt"]) {
+        const auto& z = node["zupt"]; 
+        if (z["enable"]) params.use_zupt = z["enable"].as<bool>();
+        if (z["max_gyro"]) params.zupt_max_gyro = z["max_gyro"].as<double>();
+        if (z["acc_norm_thresh"]) params.zupt_acc_norm_thresh = z["acc_norm_thresh"].as<double>();
+        if (z["sigma_v"]) params.zupt_sigma_v = z["sigma_v"].as<double>();
       }
       
       return params;
@@ -137,12 +155,17 @@ public:
     midpoint_propagate(dt, last_acc_, acc, last_gyro_, gyro);
 
     // Covariance propagation
-    imu_prop_cov(dt, 0.5*(last_acc_ + acc) - state_.ba, 0.5*(last_gyro_ + gyro) - state_.bg);
+    const Eigen::Vector3d a_avg = 0.5*(last_acc_ + acc) - state_.ba;
+    const Eigen::Vector3d w_avg = 0.5*(last_gyro_ + gyro) - state_.bg;
+    imu_prop_cov(dt, a_avg, w_avg);
 
     last_acc_ = acc;
     last_gyro_ = gyro;
     last_t_ = t;
     state_.timestamp = t;
+
+    // Optional ZUPT to clamp drift when nearly static
+    maybe_zupt_update(0.5*(last_acc_ + acc), 0.5*(last_gyro_ + gyro));
   }
 
   // Feed wheel forward speed (m/s). z = [vx, 0, 0] in wheel frame.
@@ -164,31 +187,32 @@ public:
     if (!state_.initialized) return; // still initializing
 
     // Predicted velocity at wheel origin, expressed in wheel frame
+    // Simplified kinematics: h = R_wi * ( R_i^w * v_w + s_i ), where
+    //   R_wi : wheel<-imu
+    //   R_i^w: imu<-world = q^*
+    //   s_i  : (omega_i x r_PO)_i (all in IMU frame)
     const Eigen::Matrix3d R_wi = R_iw_.toRotationMatrix().transpose(); // wheel<-imu
-    const Eigen::Matrix3d R_wTworld = R_wi * state_.q.conjugate().toRotationMatrix(); // wheel<-world = (wheel<-imu)*(imu<-world)
+    const Eigen::Matrix3d R_iTworld = state_.q.conjugate().toRotationMatrix(); // imu<-world
 
-    // r_PO^i : vector from IMU origin to Wheel origin, expressed in IMU frame (t_iw_i_)
-    const Eigen::Vector3d r_PO_i = t_iw_i_;
-    const Eigen::Vector3d omega_i = last_gyro_ - state_.bg; // use last gyro (closest in time)
-    const Eigen::Vector3d s_i = omega_i.cross(r_PO_i);      // (omega x r) in IMU frame
-    const Eigen::Vector3d v_wheel_world = state_.v + state_.q.toRotationMatrix() * s_i; // world
-    const Eigen::Vector3d h = R_wTworld * v_wheel_world;    // wheel frame predicted measurement
+    const Eigen::Vector3d r_PO_i = t_iw_i_;                   // imu->wheel, expressed in imu
+    const Eigen::Vector3d omega_i = last_gyro_ - state_.bg;   // imu angular velocity
+    const Eigen::Vector3d s_i = omega_i.cross(r_PO_i);        // imu frame
+
+    const Eigen::Vector3d v_i = R_iTworld * state_.v;         // IMU linear velocity expressed in IMU
+    const Eigen::Vector3d h = R_wi * ( v_i + s_i );           // wheel frame predicted measurement
 
     // Measurement z = [vx, 0, 0]^T
     Eigen::Vector3d z; z << vx_wheel, 0.0, 0.0;
     const Eigen::Vector3d y = z - h; // residual in wheel frame
 
-    // Jacobian H (3x15): only dv, dtheta, dbg show up
+    // Jacobian H (3x15): dv, dtheta, dbg
     Eigen::Matrix<double,3,15> H; H.setZero();
-    // dv term
-    H.block<3,3>(0,3) = R_wTworld; // d(v_wheel_world)/dv = I -> then to wheel frame
-    // dtheta term: h contains R_wTworld * ( v + R * s_i ). Only the R*s_i depends on orientation.
-    const Eigen::Matrix3d R_w = state_.q.toRotationMatrix(); // world<-imu (R(q))
-    const Eigen::Vector3d s_i_now = s_i; // shorthand
-    // For right-mult error: d(R s)/d(dtheta) = - R [s]_x
-    H.block<3,3>(0,6) = R_wTworld * ( - R_w * skew(s_i_now) );
-    // dbg term through s_i = (omega_i) x r, omega_i = omega_meas - bg
-    H.block<3,3>(0,12) = R_wTworld * ( R_w * skew(r_PO_i) );
+    // dv term: ∂h/∂v = R_wi * R_i^w
+    H.block<3,3>(0,3) = R_wi * R_iTworld;
+    // dtheta term (right-mult): R_i^w -> Exp(-dθ) R_i^w, so δ(R_i^w v) = - [v_i]_x dθ
+    H.block<3,3>(0,6) = R_wi * ( - skew(v_i) );
+    // dbg term via s_i = (ω - bg) x r ⇒ ∂s/∂bg = - [r]_x
+    H.block<3,3>(0,12) = R_wi * ( - skew(r_PO_i) );
 
     // Measurement noise
     Eigen::Matrix3d Rm = Eigen::Matrix3d::Zero();
@@ -196,14 +220,22 @@ public:
     Rm(1,1) = prm_.sigma_wheel_plane * prm_.sigma_wheel_plane;
     Rm(2,2) = prm_.sigma_wheel_plane * prm_.sigma_wheel_plane;
 
-    // Kalman gain and update
+    // Kalman gain and update (LDLT + Joseph + gating)
     const Eigen::Matrix3d S = (H * P_ * H.transpose()) + Rm;
-    const Eigen::Matrix<double,15,3> K = P_ * H.transpose() * S.inverse();
+    Eigen::LDLT<Eigen::Matrix3d> Sldlt(S);
+    if (Sldlt.info() != Eigen::Success) return; // numerical safeguard
+
+    const Eigen::Vector3d Sinv_y = Sldlt.solve(y);
+    const double gamma = y.dot(Sinv_y);
+    if (gamma > prm_.gate_chi2_wheel) return; // outlier reject
+
+    const Eigen::Matrix3d Sinv = Sldlt.solve(Eigen::Matrix3d::Identity());
+    const Eigen::Matrix<double,15,3> K = P_ * H.transpose() * Sinv;
     const Eigen::Matrix<double,15,1> dx = K * y;
 
     apply_error_state(dx);
 
-    Eigen::Matrix<double,15,15> I15 = Eigen::Matrix<double,15,15>::Identity();
+    const Eigen::Matrix<double,15,15> I15 = Eigen::Matrix<double,15,15>::Identity();
     P_ = (I15 - K * H) * P_ * (I15 - K * H).transpose() + K * Rm * K.transpose(); // Joseph form
   }
 
@@ -227,6 +259,36 @@ public:
 
 private:
   struct ImuSample { double t; Eigen::Vector3d a; Eigen::Vector3d g; };
+
+  void maybe_zupt_update(const Eigen::Vector3d& acc_i, const Eigen::Vector3d& gyro_i) {
+    if (!state_.initialized || !prm_.use_zupt) return;
+    const double gyro_norm = gyro_i.norm();
+    const double acc_norm_err = std::abs(acc_i.norm() - prm_.gravity);
+    if (gyro_norm > prm_.zupt_max_gyro || acc_norm_err > prm_.zupt_acc_norm_thresh) return;
+
+    // z = 0 - v_world
+    Eigen::Matrix<double,3,15> H; H.setZero();
+    H.block<3,3>(0,3) = Eigen::Matrix3d::Identity();
+    const Eigen::Vector3d y = - state_.v;
+    const Eigen::Matrix3d Rv = (prm_.zupt_sigma_v * prm_.zupt_sigma_v) * Eigen::Matrix3d::Identity();
+
+    const Eigen::Matrix3d S = (H * P_ * H.transpose()) + Rv;
+    Eigen::LDLT<Eigen::Matrix3d> Sldlt(S);
+    if (Sldlt.info() != Eigen::Success) return;
+
+    const Eigen::Vector3d Sinv_y = Sldlt.solve(y);
+    const double gamma = y.dot(Sinv_y);
+    if (gamma > prm_.gate_chi2_zupt) return;
+
+    const Eigen::Matrix3d Sinv = Sldlt.solve(Eigen::Matrix3d::Identity());
+    const Eigen::Matrix<double,15,3> K = P_ * H.transpose() * Sinv;
+    const Eigen::Matrix<double,15,1> dx = K * y;
+
+    apply_error_state(dx);
+
+    const Eigen::Matrix<double,15,15> I15 = Eigen::Matrix<double,15,15>::Identity();
+    P_ = (I15 - K * H) * P_ * (I15 - K * H).transpose() + K * Rv * K.transpose();
+  }
 
   static inline Eigen::Matrix3d skew(const Eigen::Vector3d& v) {
     Eigen::Matrix3d m; m << 0, -v.z(), v.y(), v.z(), 0, -v.x(), -v.y(), v.x(), 0; return m;
@@ -291,16 +353,17 @@ private:
     if (gyro_mean.norm() > prm_.init_max_gyro) return;
     if (acc_var.cwiseSqrt().maxCoeff() > prm_.init_acc_std_thresh) return;
 
-    // Initial orientation: map measured average accel direction to gravity
-    // At rest: a_meas ≈ R^T * (-g) + b_a. Ignore b_a for first init.
-    const Eigen::Vector3d z_down(0,0,-1);
-    Eigen::Quaterniond q_wi = quat_from_two_vectors(acc_mean.normalized(), z_down);
+    // Initial orientation: use specific force direction to align +Z (up) so that R_wi * a_mean ≈ +g_up.
+    // At rest: f_b ≈ R^T ( -g_w ), with g_w = [0,0,-g]. Therefore R * f_b ≈ +[0,0,g]/g → +Z.
+    const Eigen::Vector3d z_up(0,0,1);
+    Eigen::Quaterniond q_wi = quat_from_two_vectors(acc_mean.normalized(), z_up);
 
     state_.q = q_wi.normalized();
     state_.v.setZero();
     state_.p.setZero();
     state_.bg = gyro_mean; // gyro bias = mean gyro at rest
-    state_.ba.setZero();   // keep zero for simplicity in first version
+    // initialize accelerometer bias so that predicted specific force matches measurement at rest
+    state_.ba = acc_mean - state_.q.conjugate().toRotationMatrix() * Eigen::Vector3d(0,0,prm_.gravity);
     state_.timestamp = t0;
     state_.initialized = true;
 
@@ -372,11 +435,10 @@ private:
     state_.ba += dx.segment<3>(9);
     state_.bg += dx.segment<3>(12);
 
-    // Reset error-state
+    // Minimal consistent reset for right-mult error: rotate orientation error subspace
+    Eigen::Matrix3d J = Eigen::Matrix3d::Identity() - 0.5 * skew(dtheta);
     Eigen::Matrix<double,15,15> G = Eigen::Matrix<double,15,15>::Identity();
-    // For right-mult quaternion ESKF, we need the first-order reset Jacobian
-    // that rotates the cov sub-blocks coupled with orientation. Here, identity is
-    // acceptable for a concise first version since we use Joseph form above.
+    G.block<3,3>(6,6) = J;
     P_ = G * P_ * G.transpose();
   }
 

@@ -155,7 +155,7 @@ int main(int argc, char** argv) {
     auto qo = data_loader.odomQueue();
 
     // 使用配置文件创建ESKF实例
-    Eigen::Isometry3d T_iw = Eigen::Isometry3d(calibration_data.extrinsic_body_T_wheel.transform.inverse());
+    Eigen::Isometry3d T_iw = Eigen::Isometry3d(calibration_data.extrinsic_body_T_wheel.transform);
     Eigen::Quaterniond q_iw(T_iw.rotation());
     Eigen::Vector3d t_iw = T_iw.translation();
 

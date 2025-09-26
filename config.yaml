@@ -34,8 +34,8 @@ eskf:
     sigma_gyro: 0.02                   # rad/s/√Hz (gyroscope noise)
     sigma_ba: 0.0005                    # m/s²/√Hz (accelerometer bias random walk)
     sigma_bg: 0.0002                    # rad/s/√Hz (gyroscope bias random walk)
-    sigma_wheel_vx: 0.05                # m/s (wheel forward speed noise)
-    sigma_wheel_plane: 0.02            # m/s (wheel lateral/vertical constraint noise)
+    sigma_wheel_vx: 0.1                # m/s (wheel forward speed noise)
+    sigma_wheel_plane: 0.005            # m/s (wheel lateral/vertical constraint noise)
   
   # Physical constants
   gravity: 9.81                         # m/s²
@@ -45,4 +45,11 @@ eskf:
     min_samples: 200                    # minimum samples for static initialization (~2s at 100Hz)
     max_gyro: 0.05                      # rad/s (maximum gyro magnitude for static init)
     acc_std_thresh: 0.1                 # m/s² (maximum acceleration std for static init)
+  
+  # Zero-velocity update (ZUPT) parameters
+  zupt:
+    enable: false                        # enable zero-velocity updates
+    max_gyro: 0.1                      # rad/s (maximum gyro magnitude for ZUPT)
+    acc_norm_thresh: 0.15               # m/s² (maximum | |a| - g | for ZUPT)
+    sigma_v: 0.01                       # m/s (velocity measurement noise for ZUPT)
   
