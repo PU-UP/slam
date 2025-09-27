@@ -6,6 +6,7 @@
 #include <limits>
 #include <yaml-cpp/yaml.h>
 #include <string>
+#include <iostream>
 
 // Minimal Error-State Kalman Filter (ESKF) for a differential-drive robot.
 // Sensors: IMU (acc, gyro) and wheel forward speed (no yaw-rate).
@@ -48,7 +49,7 @@ public:
     double zupt_sigma_v = 0.02;          // m/s
 
     // Robust gating (chi-square) to avoid blow-ups
-    double gate_chi2_wheel = 25.0;     // ~95% in 3D
+    double gate_chi2_wheel = 7.8;     // ~95% in 3D
     double gate_chi2_zupt  = 25.0;
 
     // 从YAML节点加载参数
@@ -145,8 +146,11 @@ public:
     }
 
     if (t <= last_t_) {
+      static int count = 0;
+      count++;
+      std::cout << "Non-increasing timestamp, ignore: " << count << std::endl;
       // Non-increasing timestamp, ignore
-      last_acc_ = acc; last_gyro_ = gyro; last_t_ = t; 
+      // last_acc_ = acc; last_gyro_ = gyro; last_t_ = t; 
       return;
     }
 
@@ -211,8 +215,8 @@ public:
     H.block<3,3>(0,3) = R_wi * R_iTworld;
     // dtheta term (right-mult): R_i^w -> Exp(-dθ) R_i^w, so δ(R_i^w v) = - [v_i]_x dθ
     H.block<3,3>(0,6) = R_wi * ( - skew(v_i) );
-    // dbg term via s_i = (ω - bg) x r ⇒ ∂s/∂bg = - [r]_x
-    H.block<3,3>(0,12) = R_wi * ( - skew(r_PO_i) );
+    // dbg term via s_i = (ω - bg) x r ⇒ ∂s/∂bg = [r]_x
+    H.block<3,3>(0,12) = R_wi * ( skew(r_PO_i) );
 
     // Measurement noise
     Eigen::Matrix3d Rm = Eigen::Matrix3d::Zero();

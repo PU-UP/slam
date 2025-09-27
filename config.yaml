@@ -31,10 +31,10 @@ eskf:
   # Noise parameters (square root of power spectral density)
   noise:
     sigma_acc: 0.8                      # m/s²/√Hz (accelerometer noise)
-    sigma_gyro: 0.02                   # rad/s/√Hz (gyroscope noise)
+    sigma_gyro: 0.001                   # rad/s/√Hz (gyroscope noise)
     sigma_ba: 0.0005                    # m/s²/√Hz (accelerometer bias random walk)
-    sigma_bg: 0.0002                    # rad/s/√Hz (gyroscope bias random walk)
-    sigma_wheel_vx: 0.1                # m/s (wheel forward speed noise)
+    sigma_bg: 0.0001                    # rad/s/√Hz (gyroscope bias random walk)
+    sigma_wheel_vx: 0.01                # m/s (wheel forward speed noise)
     sigma_wheel_plane: 0.005            # m/s (wheel lateral/vertical constraint noise)
   
   # Physical constants
