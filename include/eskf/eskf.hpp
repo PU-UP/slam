@@ -34,7 +34,8 @@ public:
     double sigma_ba = 0.0005;            // m/s^2 / sqrt(Hz) (bias RW)
     double sigma_bg = 0.0002;            // rad/s / sqrt(Hz) (bias RW)
     double sigma_wheel_vx = 0.05;        // m/s (forward)
-    double sigma_wheel_plane = 0.02;     // m/s (lateral & vertical constraints)
+    double sigma_wheel_lateral = 0.02;   // m/s (lateral constraints)
+    double sigma_wheel_vertical = 0.02;  // m/s (vertical constraints)
     double gravity = 9.81;               // m/s^2
 
     // Static initialization params
@@ -63,7 +64,8 @@ public:
         if (noise["sigma_ba"]) params.sigma_ba = noise["sigma_ba"].as<double>();
         if (noise["sigma_bg"]) params.sigma_bg = noise["sigma_bg"].as<double>();
         if (noise["sigma_wheel_vx"]) params.sigma_wheel_vx = noise["sigma_wheel_vx"].as<double>();
-        if (noise["sigma_wheel_plane"]) params.sigma_wheel_plane = noise["sigma_wheel_plane"].as<double>();
+        if (noise["sigma_wheel_lateral"]) params.sigma_wheel_lateral = noise["sigma_wheel_lateral"].as<double>();
+        if (noise["sigma_wheel_vertical"]) params.sigma_wheel_vertical = noise["sigma_wheel_vertical"].as<double>();
       }
       
       if (node["gravity"]) {
@@ -221,8 +223,8 @@ public:
     // Measurement noise
     Eigen::Matrix3d Rm = Eigen::Matrix3d::Zero();
     Rm(0,0) = prm_.sigma_wheel_vx * prm_.sigma_wheel_vx;
-    Rm(1,1) = prm_.sigma_wheel_plane * prm_.sigma_wheel_plane;
-    Rm(2,2) = prm_.sigma_wheel_plane * prm_.sigma_wheel_plane;
+    Rm(1,1) = prm_.sigma_wheel_lateral * prm_.sigma_wheel_lateral;
+    Rm(2,2) = prm_.sigma_wheel_vertical * prm_.sigma_wheel_vertical;
 
     // Kalman gain and update (LDLT + Joseph + gating)
     const Eigen::Matrix3d S = (H * P_ * H.transpose()) + Rm;
