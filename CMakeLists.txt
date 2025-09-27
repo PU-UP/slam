@@ -60,6 +60,12 @@ target_link_libraries(modules PUBLIC
 # 创建data_prepare库
 add_library(data_prepare data_prepare.cpp data_prepare.hpp)
 
+# 创建dr_odo_flow库
+add_library(dr_odo_flow 
+    src/dr_odo_flow.cpp
+    include/dr/dr_odo_flow.hpp
+)
+
 # 设置data_prepare库的包含目录
 target_include_directories(data_prepare PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -70,6 +76,23 @@ target_include_directories(data_prepare PUBLIC
 
 # 链接data_prepare库的依赖
 target_link_libraries(data_prepare PUBLIC
+    ${OpenCV_LIBS}
+    ${YAML_CPP_LIBRARIES}
+    Eigen3::Eigen
+    stdc++fs
+)
+
+# 设置dr_odo_flow库的包含目录
+target_include_directories(dr_odo_flow PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${EIGEN3_INCLUDE_DIR}
+    ${OpenCV_INCLUDE_DIRS}
+    ${YAML_CPP_INCLUDE_DIRS}
+)
+
+# 链接dr_odo_flow库的依赖
+target_link_libraries(dr_odo_flow PUBLIC
     ${OpenCV_LIBS}
     ${YAML_CPP_LIBRARIES}
     Eigen3::Eigen
@@ -109,6 +132,7 @@ target_include_directories(app PRIVATE
 # 链接slam可执行文件的依赖
 target_link_libraries(app PRIVATE
     data_prepare
+    dr_odo_flow
     modules
     ${OpenCV_LIBS}
     Eigen3::Eigen

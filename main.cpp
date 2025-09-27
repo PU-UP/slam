@@ -15,7 +15,7 @@
 #include <fcntl.h>
 #include "data_prepare.hpp"
 #include "include/slam/modules.hpp"
-
+#include "dr/dr_odo_flow.hpp"
 #include "eskf/eskf.hpp"
 
 // 全局控制变量
@@ -163,20 +163,35 @@ int main(int argc, char** argv) {
     eskf filter = eskf::fromConfigFile(config_path, q_iw, t_iw);
     std::cout << "ESKF created successfully with parameters from config file" << std::endl;
 
+    // 创建DR实例
+    std::cout << "Creating DR (Dead Reckoning) instance..." << std::endl;
+    dr_odom::DrOdoFlow dr_filter(config_path, calibration_data, config.enable_debug);
+    std::cout << "DR created successfully" << std::endl;
+
     std::priority_queue<Event, std::vector<Event>, CmpEvent> pq;
     if (!qi.empty()) { auto m = qi.front(); qi.pop(); pq.push({Event::IMU,  m->timestamp, m, {}}); }
     if (!qo.empty()) { auto m = qo.front(); qo.pop(); pq.push({Event::ODOM, m->timestamp, {}, m}); }
 
     
-    std::string out_path = "eskf_result.txt";
-    std::ofstream fout(out_path);
-    if (!fout) {
-        std::cerr << "无法写入文件: " << out_path << "\n";
+    std::string eskf_out_path = "eskf_result.txt";
+    std::ofstream eskf_fout(eskf_out_path);
+    if (!eskf_fout) {
+        std::cerr << "无法写入ESKF文件: " << eskf_out_path << "\n";
         return 1;
     }
-    fout << std::fixed << std::setprecision(9);
+    eskf_fout << std::fixed << std::setprecision(9);
     // 表头：时间 位姿 速度 四元数
-    fout << "t,px,py,pz,vx,vy,vz,qw,qx,qy,qz\n";
+    eskf_fout << "t,px,py,pz,vx,vy,vz,qw,qx,qy,qz\n";
+
+    std::string dr_out_path = "dr_result.txt";
+    std::ofstream dr_fout(dr_out_path);
+    if (!dr_fout) {
+        std::cerr << "无法写入DR文件: " << dr_out_path << "\n";
+        return 1;
+    }
+    dr_fout << std::fixed << std::setprecision(9);
+    // 表头：时间 位姿 速度 四元数（与ESKF格式一致）
+    dr_fout << "t,px,py,pz,vx,vy,vz,qw,qx,qy,qz\n";
 
     // 4) 驱动滤波
     double last_progress_time = 0.0;
@@ -210,16 +225,22 @@ int main(int argc, char** argv) {
 
         if (ev.type == Event::IMU) {
             auto m = ev.imu;
-            // // IMU 原始量（注意：这里默认 IMU 数据在 IMU系 i）
+            // IMU 原始量（注意：这里默认 IMU 数据在 IMU系 i）
             Eigen::Vector3d gyroscope_raw(m->gx, m->gy, m->gz);
             Eigen::Vector3d accelerometer_raw(m->ax, m->ay, m->az);
+            
+            // 同时处理ESKF和DR
             filter.feedimu(m->timestamp, accelerometer_raw, gyroscope_raw);
+            dr_filter.setImu(m->timestamp, m->ax, m->ay, m->az, m->gx, m->gy, m->gz);
         } else {
             auto m = ev.odom;
             // 轮速：使用 twist.linear.x 作为前向速度（与 wheel-x 对齐）
-            // filter.updateWheelSpeed(m->timestamp, m->vx);
             filter.feedwheelvelocity(m->timestamp, m->vx);
+            dr_filter.setWheel(m->timestamp, m->vx, m->wz);
         }
+        
+        // 运行DR处理
+        dr_filter.Run();
 
         // 定期打印进度和当前状态
         if (ev.t - last_progress_time >= progress_interval) {
@@ -246,21 +267,36 @@ int main(int argc, char** argv) {
             last_progress_time = ev.t;
         }
 
+        // 保存ESKF结果
         const auto& S = filter.getNominalState();
         if (S.initialized) {
-            const auto& S = filter.getNominalState();
-            fout << S.timestamp << ","
+            eskf_fout << S.timestamp << ","
                      << S.p.x() << "," << S.p.y() << "," << S.p.z() << ","
                      << S.v.x() << "," << S.v.y() << "," << S.v.z() << ","
                      << S.q.w() << "," << S.q.x() << "," << S.q.y() << "," << S.q.z()
                      << "\n";
-        } else {
-            // 未初始化期间不输出pose，这里可打印监控行（可选）
-            // std::cout << ev.t << ",0,,,,,,,,,\n";
+        }
+        
+        // 保存DR结果
+        double dr_time;
+        Eigen::Matrix4d dr_pose;
+        dr_filter.getPose(dr_time, dr_pose);
+        
+        if (dr_time > 0) {
+            Eigen::Vector3d dr_position = dr_pose.block<3,1>(0,3);
+            Eigen::Matrix3d dr_rotation = dr_pose.block<3,3>(0,0);
+            Eigen::Quaterniond dr_quat(dr_rotation);
+            
+            dr_fout << dr_time << ","
+                   << dr_position.x() << "," << dr_position.y() << "," << dr_position.z() << ","
+                   << -1.0 << "," << -1.0 << "," << -1.0 << ","  // 速度用-1代替
+                   << dr_quat.w() << "," << dr_quat.x() << "," << dr_quat.y() << "," << dr_quat.z()
+                   << "\n";
         }
     }
 
-    fout.close();
+    eskf_fout.close();
+    dr_fout.close();
 
     // 设置退出标志，等待键盘线程结束
     should_exit.store(true);
@@ -281,6 +317,7 @@ int main(int argc, char** argv) {
     //     std::cout << "# Final v: " << S.velocity.transpose() << "\n";
     // }
 
-    std::cout << "结果已保存到: " << out_path << std::endl;
+    std::cout << "ESKF结果已保存到: " << eskf_out_path << std::endl;
+    std::cout << "DR结果已保存到: " << dr_out_path << std::endl;
     return 0;
 }

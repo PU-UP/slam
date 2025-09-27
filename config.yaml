@@ -14,6 +14,8 @@ debug:
   enable_debug: true
   save_intermediate: true
   output_dir: "../build/output"
+  # DR specific debug options
+  dr_debug: true                          # enable DR debug output
 
 # File paths
 paths:
@@ -60,4 +62,29 @@ eskf:
     max_gyro: 0.1                      # rad/s (maximum gyro magnitude for ZUPT)
     acc_norm_thresh: 0.15               # m/s² (maximum | |a| - g | for ZUPT)
     sigma_v: 0.03                       # m/s (velocity measurement noise for ZUPT)
+
+# DR (Dead Reckoning) Configuration
+dr:
+  # Mahony filter parameters
+  mahony:
+    kp: 1.0                             # proportional gain
+    ki: 0.0001                          # integral gain
+  
+  # IMU processing parameters
+  imu:
+    static_gyro_threshold: 0.015        # rad/s (threshold for static detection)
+    time_diff_warning: 0.1              # s (warning threshold for IMU time difference)
+    time_diff_error: 1.0                # s (error threshold for IMU time difference)
+    buffer_max_size: 400                # maximum IMU buffer size
+  
+  # Wheel processing parameters
+  wheel:
+    buffer_max_size: 100                # maximum wheel buffer size
+    velocity_max: 0.8                   # m/s (maximum valid velocity)
+    displacement_max: 0.4               # m (maximum valid displacement per step
+  
+  # Bias estimation parameters
+  bias:
+    acc_bias_update_samples: 100        # samples for acc bias update
+    gyro_bias_update_samples: 1000      # samples for gyro bias update
   
