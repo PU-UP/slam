@@ -171,7 +171,7 @@ public:
     state_.timestamp = t;
 
     // Optional ZUPT to clamp drift when nearly static
-    maybe_zupt_update(0.5*(last_acc_ + acc), 0.5*(last_gyro_ + gyro));
+    // maybe_zupt_update(0.5*(last_acc_ + acc), 0.5*(last_gyro_ + gyro));
   }
 
   // Feed wheel forward speed (m/s). z = [vx, 0, 0] in wheel frame.
@@ -243,6 +243,8 @@ public:
 
     const Eigen::Matrix<double,15,15> I15 = Eigen::Matrix<double,15,15>::Identity();
     P_ = (I15 - K * H) * P_ * (I15 - K * H).transpose() + K * Rm * K.transpose(); // Joseph form
+
+    maybe_zupt_update(vx_wheel);
   }
 
   NominalState getNominalState() const { return state_; }
@@ -272,6 +274,19 @@ private:
     const double acc_norm_err = std::abs(acc_i.norm() - prm_.gravity);
     if (gyro_norm > prm_.zupt_max_gyro || acc_norm_err > prm_.zupt_acc_norm_thresh) return;
 
+    zupt_update();
+  }
+
+  void maybe_zupt_update(const double& wheel_vx) {
+    if (!state_.initialized || !prm_.use_zupt) return;
+    const double gyro_norm = last_gyro_.norm();
+    const double acc_norm_err = std::abs(last_acc_.norm() - prm_.gravity);
+    if (gyro_norm > prm_.zupt_max_gyro || acc_norm_err > prm_.zupt_acc_norm_thresh) return;
+    if (wheel_vx > 0.01) return;
+    zupt_update();
+  }
+
+  void zupt_update() {
     // z = 0 - v_world
     Eigen::Matrix<double,3,15> H; H.setZero();
     H.block<3,3>(0,3) = Eigen::Matrix3d::Identity();
