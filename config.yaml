@@ -81,7 +81,7 @@ dr:
   wheel:
     buffer_max_size: 100                # maximum wheel buffer size
     velocity_max: 0.8                   # m/s (maximum valid velocity)
-    displacement_max: 0.4               # m (maximum valid displacement per step
+    displacement_max: 0.4               # m (maximum valid displacement per step)
   
   # Bias estimation parameters
   bias:

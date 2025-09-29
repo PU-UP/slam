@@ -165,7 +165,7 @@ int main(int argc, char** argv) {
 
     // 创建DR实例
     std::cout << "Creating DR (Dead Reckoning) instance..." << std::endl;
-    dr_odom::DrOdoFlow dr_filter(config_path, calibration_data, config.enable_debug);
+    dr_odom::DrOdoFlow dr_filter(config_path, calibration_data, config.dr_debug);
     std::cout << "DR created successfully" << std::endl;
 
     std::priority_queue<Event, std::vector<Event>, CmpEvent> pq;

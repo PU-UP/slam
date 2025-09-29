@@ -284,6 +284,7 @@ struct MainConfig {
     bool enable_debug = true;
     bool save_intermediate = true;
     std::string output_dir = "../build/output";
+    bool dr_debug = false;  // DR specific debug flag
     
     // File paths
     std::string calibration_config_path = "../calibration_config.yaml";

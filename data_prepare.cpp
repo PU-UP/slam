@@ -313,6 +313,7 @@ bool LoadMainConfiguration(const std::string& config_path, MainConfig& config) {
             config.enable_debug = debug_node["enable_debug"].as<bool>(config.enable_debug);
             config.save_intermediate = debug_node["save_intermediate"].as<bool>(config.save_intermediate);
             config.output_dir = debug_node["output_dir"].as<std::string>(config.output_dir);
+            config.dr_debug = debug_node["dr_debug"].as<bool>(config.dr_debug);
         }
         
         // Load file paths
