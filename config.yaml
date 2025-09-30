@@ -21,10 +21,10 @@ debug:
 paths:
   output_prefix: "slam_"  
   # 568_light
-  calibration_config: "../data/568_light/calibration_config.yaml"
-  gnss_file: "../data/568_light/gnss_data.txt"
-  imu_file: "../data/568_light/bmi_imu_data.txt"
-  odom_file: "../data/568_light/odom_data.txt"
+  # calibration_config: "../data/568_light/calibration_config.yaml"
+  # gnss_file: "../data/568_light/gnss_data.txt"
+  # imu_file: "../data/568_light/bmi_imu_data.txt"
+  # odom_file: "../data/568_light/odom_data.txt"
 
   # school
   # calibration_config: "../data/school/calibration_config.yaml"
@@ -33,10 +33,10 @@ paths:
   # odom_file: "../data/school/odom_data.txt"
 
   # shadow
-  # calibration_config: "../data/shadow/calibration_config.yaml"
-  # gnss_file: "../data/shadow/gnss_data.txt"
-  # imu_file: "../data/shadow/bmi_imu_data.txt"
-  # odom_file: "../data/shadow/odom_data.txt"
+  calibration_config: "../data/shadow/calibration_config.yaml"
+  gnss_file: "../data/shadow/gnss_data.txt"
+  imu_file: "../data/shadow/bmi_imu_data.txt"
+  odom_file: "../data/shadow/odom_data.txt"
 
   # No8
   # calibration_config: "../data/No8/calibration_config.yaml"
@@ -62,16 +62,29 @@ eskf:
   
   # Static initialization parameters
   init:
-    min_samples: 20000                    # minimum samples for static initialization (~2s at 100Hz)
-    max_gyro: 0.05                      # rad/s (maximum gyro magnitude for static init)
+    min_samples: 1000                    # minimum samples for static initialization (~2s at 100Hz)
+    max_gyro: 0.1                      # rad/s (maximum gyro magnitude for static init)
     acc_std_thresh: 0.1                 # m/s² (maximum acceleration std for static init)
+    max_wheel_vx: 0.01                  # m/s (maximum wheel velocity for static init)
   
   # Zero-velocity update (ZUPT) parameters
   zupt:
     enable: true                        # enable zero-velocity updates
-    max_gyro: 0.05                      # rad/s (maximum gyro magnitude for ZUPT)
-    acc_norm_thresh: 0.1               # m/s² (maximum | |a| - g | for ZUPT)
-    sigma_v: 0.01                       # m/s (velocity measurement noise for ZUPT)
+    sigma_v: 0.03                       # m/s (velocity measurement noise for ZUPT)
+
+  zuar:
+    enable: false
+    sigma_w: 0.01
+
+  zau:
+    enable: false
+    sigma_a: 0.03
+
+  gate:
+    gate_chi2_wheel: 7.8     # ~95% in 3D
+    gate_chi2_zupt: 11.3
+    gate_chi2_zaru: 7.8147
+    gate_chi2_zau: 7.8147
 
 # DR (Dead Reckoning) Configuration
 dr:

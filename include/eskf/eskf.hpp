@@ -42,16 +42,23 @@ public:
     int    init_min_samples = 200;       // ~2s at 100 Hz
     double init_max_gyro = 0.05;         // rad/s
     double init_acc_std_thresh = 0.1;    // m/s^2
+    double init_max_wheel_vx = 0.01;    // m/s
 
     // Simple zero-velocity updates (ZUPT) when detected static
     bool   use_zupt = false;
-    double zupt_max_gyro = 0.08;         // rad/s
-    double zupt_acc_norm_thresh = 0.15;  // | |a| - g |
     double zupt_sigma_v = 0.02;          // m/s
 
+    bool   use_zaru = false;
+    double zaru_sigma_w = 0.001;
+    
+    bool   use_zau = false;
+    double zau_sigma_a = 0.001;
+    
     // Robust gating (chi-square) to avoid blow-ups
     double gate_chi2_wheel = 7.8;     // ~95% in 3D
-    double gate_chi2_zupt  = 25.0;
+    double gate_chi2_zupt  = 11.3;
+    double gate_chi2_zaru = 7.8147;
+    double gate_chi2_zau = 7.8147;
 
     // 从YAML节点加载参数
     static Params fromYaml(const YAML::Node& node) {
@@ -77,14 +84,33 @@ public:
         if (init["min_samples"]) params.init_min_samples = init["min_samples"].as<int>();
         if (init["max_gyro"]) params.init_max_gyro = init["max_gyro"].as<double>();
         if (init["acc_std_thresh"]) params.init_acc_std_thresh = init["acc_std_thresh"].as<double>();
+        if (init["max_wheel_vx"]) params.init_max_wheel_vx = init["max_wheel_vx"].as<double>();
+      }
+      
+      if (node["gate"]) {
+        const auto& gate = node["gate"];
+        if (gate["gate_chi2_wheel"]) params.gate_chi2_wheel = gate["gate_chi2_wheel"].as<double>();
+        if (gate["gate_chi2_zupt"]) params.gate_chi2_zupt = gate["gate_chi2_zupt"].as<double>();
+        if (gate["gate_chi2_zaru"]) params.gate_chi2_zaru = gate["gate_chi2_zaru"].as<double>();
+        if (gate["gate_chi2_zau"]) params.gate_chi2_zau = gate["gate_chi2_zau"].as<double>();
       }
 
       if (node["zupt"]) {
         const auto& z = node["zupt"]; 
         if (z["enable"]) params.use_zupt = z["enable"].as<bool>();
-        if (z["max_gyro"]) params.zupt_max_gyro = z["max_gyro"].as<double>();
-        if (z["acc_norm_thresh"]) params.zupt_acc_norm_thresh = z["acc_norm_thresh"].as<double>();
         if (z["sigma_v"]) params.zupt_sigma_v = z["sigma_v"].as<double>();
+      }
+
+      if (node["zaru"]) {
+        const auto& zaru = node["zaru"]; 
+        if (zaru["enable"]) params.use_zaru = zaru["enable"].as<bool>();
+        if (zaru["sigma_w"]) params.zaru_sigma_w = zaru["sigma_w"].as<double>();
+      }
+
+      if (node["zau"]) {
+        const auto& zau = node["zau"]; 
+        if (zau["enable"]) params.use_zau = zau["enable"].as<bool>();
+        if (zau["sigma_a"]) params.zau_sigma_a = zau["sigma_a"].as<double>();
       }
       
       return params;
@@ -244,7 +270,7 @@ public:
     const Eigen::Matrix<double,15,15> I15 = Eigen::Matrix<double,15,15>::Identity();
     P_ = (I15 - K * H) * P_ * (I15 - K * H).transpose() + K * Rm * K.transpose(); // Joseph form
 
-    maybe_zupt_update(vx_wheel);
+    maybe_zero_update(t, vx_wheel);
   }
 
   NominalState getNominalState() const { return state_; }
@@ -268,22 +294,19 @@ public:
 private:
   struct ImuSample { double t; Eigen::Vector3d a; Eigen::Vector3d g; };
 
-  void maybe_zupt_update(const Eigen::Vector3d& acc_i, const Eigen::Vector3d& gyro_i) {
-    if (!state_.initialized || !prm_.use_zupt) return;
-    const double gyro_norm = gyro_i.norm();
-    const double acc_norm_err = std::abs(acc_i.norm() - prm_.gravity);
-    if (gyro_norm > prm_.zupt_max_gyro || acc_norm_err > prm_.zupt_acc_norm_thresh) return;
-
-    zupt_update();
-  }
-
-  void maybe_zupt_update(const double& wheel_vx) {
-    if (!state_.initialized || !prm_.use_zupt) return;
+  void maybe_zero_update(const double& t, const double& wheel_vx) {
+    if (!state_.initialized) return;
+    // 轮子和上一个imu数据时间间隔过长跳过
+    if (std::abs(t - last_t_) > 0.1) return;
     const double gyro_norm = last_gyro_.norm();
     const double acc_norm_err = std::abs(last_acc_.norm() - prm_.gravity);
-    if (gyro_norm > prm_.zupt_max_gyro || acc_norm_err > prm_.zupt_acc_norm_thresh) return;
-    if (wheel_vx > 0.01) return;
-    zupt_update();
+    // 判断机器是否在旋转
+    if (gyro_norm > prm_.init_max_gyro || acc_norm_err > prm_.init_acc_std_thresh) return;
+    // 判断轮子是否在运动
+    if (wheel_vx > prm_.init_max_wheel_vx) return;
+    if (prm_.use_zupt) zupt_update();
+    if (prm_.use_zaru) zaru_update();
+    if (prm_.use_zau) zau_update();
   }
 
   void zupt_update() {
@@ -309,6 +332,67 @@ private:
 
     const Eigen::Matrix<double,15,15> I15 = Eigen::Matrix<double,15,15>::Identity();
     P_ = (I15 - K * H) * P_ * (I15 - K * H).transpose() + K * Rv * K.transpose();
+  }
+
+  void zaru_update() {
+    // y = bg - omega_m
+    Eigen::Matrix<double,3,15> H; H.setZero();
+    H.block<3,3>(0,12) = Eigen::Matrix3d::Identity(); // dbg
+  
+    const Eigen::Vector3d y = state_.bg - last_gyro_;
+  
+    const Eigen::Matrix3d Rw = (prm_.zaru_sigma_w * prm_.zaru_sigma_w) * Eigen::Matrix3d::Identity();
+  
+    const Eigen::Matrix3d S = (H * P_ * H.transpose()) + Rw;
+    Eigen::LDLT<Eigen::Matrix3d> Sldlt(S);
+    if (Sldlt.info() != Eigen::Success) return;
+  
+    const Eigen::Vector3d Sinv_y = Sldlt.solve(y);
+    const double gamma = y.dot(Sinv_y);
+    if (gamma > prm_.gate_chi2_zaru) return;
+  
+    const Eigen::Matrix3d Sinv = Sldlt.solve(Eigen::Matrix3d::Identity());
+    const Eigen::Matrix<double,15,3> K = P_ * H.transpose() * Sinv;
+    const Eigen::Matrix<double,15,1> dx = K * y;
+  
+    apply_error_state(dx);
+  
+    const Eigen::Matrix<double,15,15> I15 = Eigen::Matrix<double,15,15>::Identity();
+    P_ = (I15 - K * H) * P_ * (I15 - K * H).transpose() + K * Rw * K.transpose();
+  }
+
+  void zau_update() {
+    // y = (ba + R^T g) - a_m
+    const Eigen::Vector3d g_w(0.0, 0.0, prm_.gravity); // world +Z = up, accel reads +g at rest
+    const Eigen::Matrix3d R_iTworld = state_.q.conjugate().toRotationMatrix(); // imu <- world = R^T
+    const Eigen::Vector3d g_i = R_iTworld * g_w;
+  
+    Eigen::Matrix<double,3,15> H; H.setZero();
+    // dtheta block:
+    H.block<3,3>(0,6)  = skew(g_i);                 // [R^T g]_x
+    // dba block:
+    H.block<3,3>(0,9)  = Eigen::Matrix3d::Identity();
+  
+    const Eigen::Vector3d y = (state_.ba + g_i) - last_acc_;
+  
+    const Eigen::Matrix3d Ra = (prm_.zau_sigma_a * prm_.zau_sigma_a) * Eigen::Matrix3d::Identity();
+  
+    const Eigen::Matrix3d S = (H * P_ * H.transpose()) + Ra;
+    Eigen::LDLT<Eigen::Matrix3d> Sldlt(S);
+    if (Sldlt.info() != Eigen::Success) return;
+  
+    const Eigen::Vector3d Sinv_y = Sldlt.solve(y);
+    const double gamma = y.dot(Sinv_y);
+    if (gamma > prm_.gate_chi2_zau) return;
+  
+    const Eigen::Matrix3d Sinv = Sldlt.solve(Eigen::Matrix3d::Identity());
+    const Eigen::Matrix<double,15,3> K = P_ * H.transpose() * Sinv;
+    const Eigen::Matrix<double,15,1> dx = K * y;
+  
+    apply_error_state(dx);
+  
+    const Eigen::Matrix<double,15,15> I15 = Eigen::Matrix<double,15,15>::Identity();
+    P_ = (I15 - K * H) * P_ * (I15 - K * H).transpose() + K * Ra * K.transpose();
   }
 
   static inline Eigen::Matrix3d skew(const Eigen::Vector3d& v) {
