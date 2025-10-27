@@ -71,6 +71,52 @@ void keyboardInputHandler() {
     tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
 }
 
+// WGS-84 constants
+const double A = 6378137.0;                     // semi-major axis (m)
+const double F = 1.0 / 298.257223563;          // flattening
+const double E2 = F * (2.0 - F);               // first eccentricity squared
+
+// Convert LLH to ECEF
+void llh_to_ecef(double lat_deg, double lon_deg, double h, 
+                 double& x, double& y, double& z) {
+    double lat = lat_deg * M_PI / 180.0;
+    double lon = lon_deg * M_PI / 180.0;
+    double sin_lat = std::sin(lat);
+    double cos_lat = std::cos(lat);
+    double sin_lon = std::sin(lon);
+    double cos_lon = std::cos(lon);
+
+    double N = A / std::sqrt(1.0 - E2 * sin_lat * sin_lat);  // prime vertical radius
+    x = (N + h) * cos_lat * cos_lon;
+    y = (N + h) * cos_lat * sin_lon;
+    z = (N * (1.0 - E2) + h) * sin_lat;
+}
+
+// Convert ECEF to ENU given a reference point
+void ecef_to_enu(double x, double y, double z,
+                 double ref_lat_deg, double ref_lon_deg, double ref_h,
+                 double& e, double& n, double& u) {
+    // Get reference point in ECEF
+    double x0, y0, z0;
+    llh_to_ecef(ref_lat_deg, ref_lon_deg, ref_h, x0, y0, z0);
+    
+    double dx = x - x0;
+    double dy = y - y0;
+    double dz = z - z0;
+
+    double lat0 = ref_lat_deg * M_PI / 180.0;
+    double lon0 = ref_lon_deg * M_PI / 180.0;
+    double sin_lat0 = std::sin(lat0);
+    double cos_lat0 = std::cos(lat0);
+    double sin_lon0 = std::sin(lon0);
+    double cos_lon0 = std::cos(lon0);
+
+    // ECEF->ENU rotation matrix
+    e = -sin_lon0 * dx + cos_lon0 * dy;
+    n = -sin_lat0 * cos_lon0 * dx - sin_lat0 * sin_lon0 * dy + cos_lat0 * dz;
+    u =  cos_lat0 * cos_lon0 * dx + cos_lat0 * sin_lon0 * dy + sin_lat0 * dz;
+}
+
 // Configuration file path finder
 inline std::string GetMainConfigPath() {
     // Try relative path
@@ -153,6 +199,7 @@ int main(int argc, char** argv) {
               
     auto qi = data_loader.imuQueue();
     auto qo = data_loader.odomQueue();
+    auto qg = data_loader.gnssQueue();
 
     // 使用配置文件创建ESKF实例
     Eigen::Isometry3d T_iw = Eigen::Isometry3d(calibration_data.extrinsic_body_T_wheel.transform);
@@ -169,9 +216,13 @@ int main(int argc, char** argv) {
     std::cout << "DR created successfully" << std::endl;
 
     std::priority_queue<Event, std::vector<Event>, CmpEvent> pq;
-    if (!qi.empty()) { auto m = qi.front(); qi.pop(); pq.push({Event::IMU,  m->timestamp, m, {}}); }
-    if (!qo.empty()) { auto m = qo.front(); qo.pop(); pq.push({Event::ODOM, m->timestamp, {}, m}); }
+    if (!qi.empty()) { auto m = qi.front(); qi.pop(); pq.push({Event::IMU,  m->timestamp, m, {}, {}}); }
+    if (!qo.empty()) { auto m = qo.front(); qo.pop(); pq.push({Event::ODOM, m->timestamp, {}, m, {}}); }
+    if (!qg.empty()) { auto m = qg.front(); qg.pop(); pq.push({Event::GNSS, m->timestamp, {}, {}, m}); }
 
+    // GNSS相关变量：锚点（第一个有效的GNSS位置）
+    double ref_lat = 0.0, ref_lon = 0.0, ref_alt = 0.0;
+    bool ref_set = false;
     
     std::string eskf_out_path = "eskf_result.txt";
     std::ofstream eskf_fout(eskf_out_path);
@@ -180,8 +231,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     eskf_fout << std::fixed << std::setprecision(9);
-    // 表头：时间 位姿 速度 四元数
-    eskf_fout << "t,px,py,pz,vx,vy,vz,qw,qx,qy,qz\n";
+    // TUM格式：timestamp tx ty tz qx qy qz qw（无表头）
 
     std::string dr_out_path = "dr_result.txt";
     std::ofstream dr_fout(dr_out_path);
@@ -190,14 +240,22 @@ int main(int argc, char** argv) {
         return 1;
     }
     dr_fout << std::fixed << std::setprecision(9);
-    // 表头：时间 位姿 速度 四元数（与ESKF格式一致）
-    dr_fout << "t,px,py,pz,vx,vy,vz,qw,qx,qy,qz\n";
+    // TUM格式：timestamp tx ty tz qx qy qz qw（无表头）
+
+    std::string gnss_out_path = "gnss_result.txt";
+    std::ofstream gnss_fout(gnss_out_path);
+    if (!gnss_fout) {
+        std::cerr << "无法写入GNSS文件: " << gnss_out_path << "\n";
+        return 1;
+    }
+    gnss_fout << std::fixed << std::setprecision(9);
+    // TUM格式：timestamp tx ty tz qx qy qz qw（无表头，GNSS基于第一个点作为锚点）
 
     // 4) 驱动滤波
     double last_progress_time = 0.0;
     double progress_interval = 1.0; // 每1秒打印一次进度
     int processed_count = 0;
-    int total_events = qi.size() + qo.size();
+    int total_events = qi.size() + qo.size() + qg.size();
     
     std::cout << "开始处理数据，总共 " << total_events << " 个事件（传感器数据）..." << std::endl;
     std::cout << "按键控制: p-暂停/继续, q-退出, s-状态, h-帮助" << std::endl;
@@ -220,8 +278,9 @@ int main(int argc, char** argv) {
         processed_count++;
         
         // push 下一条
-        if (ev.type == Event::IMU  && !qi.empty()) { auto m = qi.front(); qi.pop(); pq.push({Event::IMU,  m->timestamp, m, {}}); }
-        if (ev.type == Event::ODOM && !qo.empty()) { auto m = qo.front(); qo.pop(); pq.push({Event::ODOM, m->timestamp, {}, m}); }
+        if (ev.type == Event::IMU  && !qi.empty()) { auto m = qi.front(); qi.pop(); pq.push({Event::IMU,  m->timestamp, m, {}, {}}); }
+        if (ev.type == Event::ODOM && !qo.empty()) { auto m = qo.front(); qo.pop(); pq.push({Event::ODOM, m->timestamp, {}, m, {}}); }
+        if (ev.type == Event::GNSS && !qg.empty()) { auto m = qg.front(); qg.pop(); pq.push({Event::GNSS, m->timestamp, {}, {}, m}); }
 
         if (ev.type == Event::IMU) {
             auto m = ev.imu;
@@ -232,15 +291,42 @@ int main(int argc, char** argv) {
             // 同时处理ESKF和DR
             filter.feedimu(m->timestamp, accelerometer_raw, gyroscope_raw);
             dr_filter.setImu(m->timestamp, m->ax, m->ay, m->az, m->gx, m->gy, m->gz);
-        } else {
+        } else if (ev.type == Event::ODOM) {
             auto m = ev.odom;
             // 轮速：使用 twist.linear.x 作为前向速度（与 wheel-x 对齐）
             filter.feedwheelvelocity(m->timestamp, m->vx);
             dr_filter.setWheel(m->timestamp, m->vx, m->wz);
+        } else if (ev.type == Event::GNSS) {
+            // GNSS处理：第一个值记作锚点，后续位置基于这个锚点
+            auto m = ev.gnss;
+            
+            // 设置锚点（只设置一次）
+            if (!ref_set) {
+                ref_lat = m->lat;
+                ref_lon = m->lon;
+                ref_alt = m->alt;
+                ref_set = true;
+                std::cout << "GNSS锚点已设置: lat=" << ref_lat << ", lon=" << ref_lon << ", alt=" << ref_alt << std::endl;
+            }
+            
+            // 转换到ENU（相对于锚点）
+            double enu_e, enu_n, enu_u;
+            double x_ecef, y_ecef, z_ecef;
+            llh_to_ecef(m->lat, m->lon, m->alt, x_ecef, y_ecef, z_ecef);
+            ecef_to_enu(x_ecef, y_ecef, z_ecef, ref_lat, ref_lon, ref_alt, enu_e, enu_n, enu_u);
+            
+            // 保存GNSS轨迹到文件（TUM格式：timestamp tx ty tz qx qy qz qw）
+            // 注意：GNSS只有位置信息，四元数设为单位四元数
+            gnss_fout << m->timestamp << " "
+                     << enu_e << " " << enu_n << " " << enu_u << " "
+                     << 0.0 << " " << 0.0 << " " << 0.0 << " " << 1.0
+                     << "\n";
         }
         
-        // 运行DR处理
-        dr_filter.Run();
+        // 运行DR处理（仅当处理IMU或ODOM时）
+        if (ev.type == Event::IMU || ev.type == Event::ODOM) {
+            dr_filter.Run();
+        }
 
         // 定期打印进度和当前状态
         if (ev.t - last_progress_time >= progress_interval) {
@@ -267,36 +353,39 @@ int main(int argc, char** argv) {
             last_progress_time = ev.t;
         }
 
-        // 保存ESKF结果
-        const auto& S = filter.getNominalState();
-        if (S.initialized) {
-            eskf_fout << S.timestamp << ","
-                     << S.p.x() << "," << S.p.y() << "," << S.p.z() << ","
-                     << S.v.x() << "," << S.v.y() << "," << S.v.z() << ","
-                     << S.q.w() << "," << S.q.x() << "," << S.q.y() << "," << S.q.z()
-                     << "\n";
-        }
-        
-        // 保存DR结果
-        double dr_time;
-        Eigen::Matrix4d dr_pose;
-        dr_filter.getPose(dr_time, dr_pose);
-        
-        if (dr_time > 0) {
-            Eigen::Vector3d dr_position = dr_pose.block<3,1>(0,3);
-            Eigen::Matrix3d dr_rotation = dr_pose.block<3,3>(0,0);
-            Eigen::Quaterniond dr_quat(dr_rotation);
+        // 保存ESKF结果（仅当处理IMU或ODOM时）
+        if (ev.type == Event::IMU || ev.type == Event::ODOM) {
+            const auto& S = filter.getNominalState();
+            if (S.initialized) {
+                // TUM格式：timestamp tx ty tz qx qy qz qw
+                eskf_fout << S.timestamp << " "
+                         << S.p.x() << " " << S.p.y() << " " << S.p.z() << " "
+                         << S.q.x() << " " << S.q.y() << " " << S.q.z() << " " << S.q.w()
+                         << "\n";
+            }
             
-            dr_fout << dr_time << ","
-                   << dr_position.x() << "," << dr_position.y() << "," << dr_position.z() << ","
-                   << -1.0 << "," << -1.0 << "," << -1.0 << ","  // 速度用-1代替
-                   << dr_quat.w() << "," << dr_quat.x() << "," << dr_quat.y() << "," << dr_quat.z()
-                   << "\n";
+            // 保存DR结果
+            double dr_time;
+            Eigen::Matrix4d dr_pose;
+            dr_filter.getPose(dr_time, dr_pose);
+            
+            if (dr_time > 0) {
+                Eigen::Vector3d dr_position = dr_pose.block<3,1>(0,3);
+                Eigen::Matrix3d dr_rotation = dr_pose.block<3,3>(0,0);
+                Eigen::Quaterniond dr_quat(dr_rotation);
+                
+                // TUM格式：timestamp tx ty tz qx qy qz qw
+                dr_fout << dr_time << " "
+                       << dr_position.x() << " " << dr_position.y() << " " << dr_position.z() << " "
+                       << dr_quat.x() << " " << dr_quat.y() << " " << dr_quat.z() << " " << dr_quat.w()
+                       << "\n";
+            }
         }
     }
 
     eskf_fout.close();
     dr_fout.close();
+    gnss_fout.close();
 
     // 设置退出标志，等待键盘线程结束
     should_exit.store(true);
@@ -319,5 +408,6 @@ int main(int argc, char** argv) {
 
     std::cout << "ESKF结果已保存到: " << eskf_out_path << std::endl;
     std::cout << "DR结果已保存到: " << dr_out_path << std::endl;
+    std::cout << "GNSS结果已保存到: " << gnss_out_path << std::endl;
     return 0;
 }

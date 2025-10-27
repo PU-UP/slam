@@ -21,10 +21,10 @@ debug:
 paths:
   output_prefix: "slam_"  
   # 568_light
-  # calibration_config: "../data/568_light/calibration_config.yaml"
-  # gnss_file: "../data/568_light/gnss_data.txt"
-  # imu_file: "../data/568_light/bmi_imu_data.txt"
-  # odom_file: "../data/568_light/odom_data.txt"
+  calibration_config: "../data/568_light/calibration_config.yaml"
+  gnss_file: "../data/568_light/gnss_data.txt"
+  imu_file: "../data/568_light/bmi_imu_data.txt"
+  odom_file: "../data/568_light/odom_data.txt"
 
   # school
   # calibration_config: "../data/school/calibration_config.yaml"
@@ -33,10 +33,10 @@ paths:
   # odom_file: "../data/school/odom_data.txt"
 
   # shadow
-  calibration_config: "../data/shadow/calibration_config.yaml"
-  gnss_file: "../data/shadow/gnss_data.txt"
-  imu_file: "../data/shadow/bmi_imu_data.txt"
-  odom_file: "../data/shadow/odom_data.txt"
+  # calibration_config: "../data/shadow/calibration_config.yaml"
+  # gnss_file: "../data/shadow/gnss_data.txt"
+  # imu_file: "../data/shadow/bmi_imu_data.txt"
+  # odom_file: "../data/shadow/odom_data.txt"
 
   # No8
   # calibration_config: "../data/No8/calibration_config.yaml"
