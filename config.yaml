@@ -73,8 +73,8 @@ eskf:
     sigma_v: 0.03                       # m/s (velocity measurement noise for ZUPT)
 
   zuar:
-    enable: false
-    sigma_w: 0.01
+    enable: true
+    sigma_w: 0.05
 
   zau:
     enable: false
