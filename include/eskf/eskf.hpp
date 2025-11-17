@@ -4,6 +4,7 @@
 #include <Eigen/Geometry>
 #include <deque>
 #include <limits>
+#include <cmath>
 #include <yaml-cpp/yaml.h>
 #include <string>
 #include <iostream>
@@ -273,6 +274,53 @@ public:
     maybe_zero_update(t, vx_wheel);
   }
 
+
+  // Feed GNSS data (latitude, longitude, altitude in degrees and meters)
+  // This will set the anchor point on first call and convert to ENU coordinates
+  void feedRawGNSS(double t, double lat, double lon, double alt) {
+    // Set anchor point on first call
+    if (!gnss_ref_set_) {
+      gnss_ref_lat_ = lat;
+      gnss_ref_lon_ = lon;
+      gnss_ref_alt_ = alt;
+      gnss_ref_set_ = true;
+      std::cout << "GNSS锚点已设置: lat=" << gnss_ref_lat_ 
+                << ", lon=" << gnss_ref_lon_ 
+                << ", alt=" << gnss_ref_alt_ << std::endl;
+    }
+    
+    // Convert to ENU (relative to anchor point)
+    double x_ecef, y_ecef, z_ecef;
+    llh_to_ecef(lat, lon, alt, x_ecef, y_ecef, z_ecef);
+    ecef_to_enu(x_ecef, y_ecef, z_ecef, 
+                gnss_ref_lat_, gnss_ref_lon_, gnss_ref_alt_,
+                gnss_enu_e_, gnss_enu_n_, gnss_enu_u_);
+    gnss_timestamp_ = t;
+  }
+  
+  // Get ENU position from last GNSS measurement
+  // Returns true if valid ENU data is available, false otherwise
+  bool getENUPosition(double& e, double& n, double& u) const {
+    if (!gnss_ref_set_) {
+      return false;
+    }
+    e = gnss_enu_e_;
+    n = gnss_enu_n_;
+    u = gnss_enu_u_;
+    return true;
+  }
+  
+  // Get GNSS anchor point (reference point)
+  bool getGNSSAnchor(double& lat, double& lon, double& alt) const {
+    if (!gnss_ref_set_) {
+      return false;
+    }
+    lat = gnss_ref_lat_;
+    lon = gnss_ref_lon_;
+    alt = gnss_ref_alt_;
+    return true;
+  }
+  
   NominalState getNominalState() const { return state_; }
 
   // 从YAML配置文件创建eskf实例的静态函数
@@ -430,6 +478,51 @@ private:
     return q;
   }
 
+  // Convert LLH (WGS-84) to ECEF
+  static void llh_to_ecef(double lat_deg, double lon_deg, double h, 
+                          double& x, double& y, double& z) {
+    const double A = 6378137.0;                     // semi-major axis (m)
+    const double F = 1.0 / 298.257223563;          // flattening
+    const double E2 = F * (2.0 - F);               // first eccentricity squared
+    
+    double lat = lat_deg * M_PI / 180.0;
+    double lon = lon_deg * M_PI / 180.0;
+    double sin_lat = std::sin(lat);
+    double cos_lat = std::cos(lat);
+    double sin_lon = std::sin(lon);
+    double cos_lon = std::cos(lon);
+
+    double N = A / std::sqrt(1.0 - E2 * sin_lat * sin_lat);  // prime vertical radius
+    x = (N + h) * cos_lat * cos_lon;
+    y = (N + h) * cos_lat * sin_lon;
+    z = (N * (1.0 - E2) + h) * sin_lat;
+  }
+
+  // Convert ECEF to ENU given a reference point
+  static void ecef_to_enu(double x, double y, double z,
+                          double ref_lat_deg, double ref_lon_deg, double ref_h,
+                          double& e, double& n, double& u) {
+    // Get reference point in ECEF
+    double x0, y0, z0;
+    llh_to_ecef(ref_lat_deg, ref_lon_deg, ref_h, x0, y0, z0);
+    
+    double dx = x - x0;
+    double dy = y - y0;
+    double dz = z - z0;
+
+    double lat0 = ref_lat_deg * M_PI / 180.0;
+    double lon0 = ref_lon_deg * M_PI / 180.0;
+    double sin_lat0 = std::sin(lat0);
+    double cos_lat0 = std::cos(lat0);
+    double sin_lon0 = std::sin(lon0);
+    double cos_lon0 = std::cos(lon0);
+
+    // ECEF->ENU rotation matrix
+    e = -sin_lon0 * dx + cos_lon0 * dy;
+    n = -sin_lat0 * cos_lon0 * dx - sin_lat0 * sin_lon0 * dy + cos_lat0 * dz;
+    u =  cos_lat0 * cos_lon0 * dx + cos_lat0 * sin_lon0 * dy + sin_lat0 * dz;
+  }
+
   void try_static_initialize() {
     if ((int)init_buffer_.size() < prm_.init_min_samples) return;
 
@@ -566,4 +659,14 @@ private:
   double last_t_ = 0.0;
 
   std::deque<ImuSample> init_buffer_;
+
+  // GNSS anchor point and ENU coordinates
+  bool gnss_ref_set_ = false;
+  double gnss_ref_lat_ = 0.0;
+  double gnss_ref_lon_ = 0.0;
+  double gnss_ref_alt_ = 0.0;
+  double gnss_enu_e_ = 0.0;
+  double gnss_enu_n_ = 0.0;
+  double gnss_enu_u_ = 0.0;
+  double gnss_timestamp_ = 0.0;
 };

@@ -71,52 +71,6 @@ void keyboardInputHandler() {
     tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
 }
 
-// WGS-84 constants
-const double A = 6378137.0;                     // semi-major axis (m)
-const double F = 1.0 / 298.257223563;          // flattening
-const double E2 = F * (2.0 - F);               // first eccentricity squared
-
-// Convert LLH to ECEF
-void llh_to_ecef(double lat_deg, double lon_deg, double h, 
-                 double& x, double& y, double& z) {
-    double lat = lat_deg * M_PI / 180.0;
-    double lon = lon_deg * M_PI / 180.0;
-    double sin_lat = std::sin(lat);
-    double cos_lat = std::cos(lat);
-    double sin_lon = std::sin(lon);
-    double cos_lon = std::cos(lon);
-
-    double N = A / std::sqrt(1.0 - E2 * sin_lat * sin_lat);  // prime vertical radius
-    x = (N + h) * cos_lat * cos_lon;
-    y = (N + h) * cos_lat * sin_lon;
-    z = (N * (1.0 - E2) + h) * sin_lat;
-}
-
-// Convert ECEF to ENU given a reference point
-void ecef_to_enu(double x, double y, double z,
-                 double ref_lat_deg, double ref_lon_deg, double ref_h,
-                 double& e, double& n, double& u) {
-    // Get reference point in ECEF
-    double x0, y0, z0;
-    llh_to_ecef(ref_lat_deg, ref_lon_deg, ref_h, x0, y0, z0);
-    
-    double dx = x - x0;
-    double dy = y - y0;
-    double dz = z - z0;
-
-    double lat0 = ref_lat_deg * M_PI / 180.0;
-    double lon0 = ref_lon_deg * M_PI / 180.0;
-    double sin_lat0 = std::sin(lat0);
-    double cos_lat0 = std::cos(lat0);
-    double sin_lon0 = std::sin(lon0);
-    double cos_lon0 = std::cos(lon0);
-
-    // ECEF->ENU rotation matrix
-    e = -sin_lon0 * dx + cos_lon0 * dy;
-    n = -sin_lat0 * cos_lon0 * dx - sin_lat0 * sin_lon0 * dy + cos_lat0 * dz;
-    u =  cos_lat0 * cos_lon0 * dx + cos_lat0 * sin_lon0 * dy + sin_lat0 * dz;
-}
-
 // Configuration file path finder
 inline std::string GetMainConfigPath() {
     // Try relative path
@@ -220,9 +174,6 @@ int main(int argc, char** argv) {
     if (!qo.empty()) { auto m = qo.front(); qo.pop(); pq.push({Event::ODOM, m->timestamp, {}, m, {}}); }
     if (!qg.empty()) { auto m = qg.front(); qg.pop(); pq.push({Event::GNSS, m->timestamp, {}, {}, m}); }
 
-    // GNSS相关变量：锚点（第一个有效的GNSS位置）
-    double ref_lat = 0.0, ref_lon = 0.0, ref_alt = 0.0;
-    bool ref_set = false;
     
     std::string eskf_out_path = "eskf_result.txt";
     std::ofstream eskf_fout(eskf_out_path);
@@ -297,30 +248,22 @@ int main(int argc, char** argv) {
             filter.feedwheelvelocity(m->timestamp, m->vx);
             dr_filter.setWheel(m->timestamp, m->vx, m->wz);
         } else if (ev.type == Event::GNSS) {
-            // GNSS处理：第一个值记作锚点，后续位置基于这个锚点
+            // GNSS处理：使用filter处理GNSS数据并转换到ENU坐标系
             auto m = ev.gnss;
             
-            // 设置锚点（只设置一次）
-            if (!ref_set) {
-                ref_lat = m->lat;
-                ref_lon = m->lon;
-                ref_alt = m->alt;
-                ref_set = true;
-                std::cout << "GNSS锚点已设置: lat=" << ref_lat << ", lon=" << ref_lon << ", alt=" << ref_alt << std::endl;
-            }
+            // 将GNSS数据传入filter（会自动设置锚点并转换到ENU）
+            filter.feedRawGNSS(m->timestamp, m->lat, m->lon, m->alt);
             
-            // 转换到ENU（相对于锚点）
+            // 从filter获取ENU坐标
             double enu_e, enu_n, enu_u;
-            double x_ecef, y_ecef, z_ecef;
-            llh_to_ecef(m->lat, m->lon, m->alt, x_ecef, y_ecef, z_ecef);
-            ecef_to_enu(x_ecef, y_ecef, z_ecef, ref_lat, ref_lon, ref_alt, enu_e, enu_n, enu_u);
-            
-            // 保存GNSS轨迹到文件（TUM格式：timestamp tx ty tz qx qy qz qw）
-            // 注意：GNSS只有位置信息，四元数设为单位四元数
-            gnss_fout << m->timestamp << " "
-                     << enu_e << " " << enu_n << " " << enu_u << " "
-                     << 0.0 << " " << 0.0 << " " << 0.0 << " " << 1.0
-                     << "\n";
+            if (filter.getENUPosition(enu_e, enu_n, enu_u)) {
+                // 保存GNSS轨迹到文件（TUM格式：timestamp tx ty tz qx qy qz qw）
+                // 注意：GNSS只有位置信息，四元数设为单位四元数
+                gnss_fout << m->timestamp << " "
+                         << enu_e << " " << enu_n << " " << enu_u << " "
+                         << 0.0 << " " << 0.0 << " " << 0.0 << " " << 1.0
+                         << "\n";
+            }
         }
         
         // 运行DR处理（仅当处理IMU或ODOM时）
