@@ -24,18 +24,25 @@
 #include <mutex>
 #include <sstream>
 
-// ====== 共享的最新状态（发给Python） ======
-struct TelemetryState {
-    double t{0};
-    double px{0}, py{0}, pz{0};
-    double vx{0}, vy{0}, vz{0};
-    double yaw_rad{0};
-    bool initialized{false};
-    bool paused{false};
+#include <cstring>      // for std::memset
+#include <filesystem>   // 你用到了 std::filesystem::exists
+
+struct TrackPose {
+    double x{0.0}, y{0.0};
+    double yaw{0.0};   // rad
+    int init{0};
+};
+
+struct TelemetryStateMulti {
+    double t{0.0};     // 建议用“当前系统时间戳”（eskf时间或事件时间）
+    int paused{0};
+    TrackPose eskf;
+    TrackPose dr;
+    TrackPose gnss;
 };
 
 std::mutex g_state_mtx;
-TelemetryState g_latest;
+TelemetryStateMulti g_latest;
 
 // 全局控制变量
 std::atomic<bool> is_paused(false);
@@ -71,7 +78,7 @@ class UdpTelemetrySender {
     private:
         void loop() {
             while (!should_exit.load()) {
-                TelemetryState s;
+                TelemetryStateMulti s;
                 {
                     std::lock_guard<std::mutex> lk(g_state_mtx);
                     s = g_latest;
@@ -79,19 +86,37 @@ class UdpTelemetrySender {
     
                 // 简单 JSON（手写拼接，够用）
                 std::ostringstream oss;
-                oss.setf(std::ios::fixed); oss<<std::setprecision(6);
+                oss.setf(std::ios::fixed);
+                oss << std::setprecision(6);
+
                 oss << "{"
                     << "\"t\":" << s.t
-                    << ",\"px\":" << s.px << ",\"py\":" << s.py << ",\"pz\":" << s.pz
-                    << ",\"vx\":" << s.vx << ",\"vy\":" << s.vy << ",\"vz\":" << s.vz
-                    << ",\"yaw\":" << s.yaw_rad
-                    << ",\"init\":" << (s.initialized?1:0)
-                    << ",\"paused\":" << (s.paused?1:0)
+                    << ",\"paused\":" << s.paused
+                    << ",\"eskf\":{"
+                        << "\"init\":" << s.eskf.init
+                        << ",\"x\":" << s.eskf.x
+                        << ",\"y\":" << s.eskf.y
+                        << ",\"yaw\":" << s.eskf.yaw
+                    << "}"
+                    << ",\"dr\":{"
+                        << "\"init\":" << s.dr.init
+                        << ",\"x\":" << s.dr.x
+                        << ",\"y\":" << s.dr.y
+                        << ",\"yaw\":" << s.dr.yaw
+                    << "}"
+                    << ",\"gnss\":{"
+                        << "\"init\":" << s.gnss.init
+                        << ",\"x\":" << s.gnss.x
+                        << ",\"y\":" << s.gnss.y
+                        // GNSS没有航向也可以发 yaw=0；如果你更想省字段就删掉这一行
+                        << ",\"yaw\":" << s.gnss.yaw
+                    << "}"
                     << "}";
-    
+
                 std::string msg = oss.str();
                 ::sendto(sock_, msg.data(), msg.size(), 0,
-                         (struct sockaddr*)&addr_, sizeof(addr_));
+                        (struct sockaddr*)&addr_, sizeof(addr_));
+
     
                 std::this_thread::sleep_for(std::chrono::milliseconds(period_ms_));
             }
@@ -421,6 +446,15 @@ int main(int argc, char** argv) {
                          << enu_e << " " << enu_n << " " << enu_u << " "
                          << 0.0 << " " << 0.0 << " " << 0.0 << " " << 1.0
                          << "\n";
+                
+                // 更新GNSS轨迹到全局状态
+                {
+                    std::lock_guard<std::mutex> lk(g_state_mtx);
+                    g_latest.gnss.x = enu_e;
+                    g_latest.gnss.y = enu_n;
+                    g_latest.gnss.yaw = 0.0;  // GNSS没有航向信息
+                    g_latest.gnss.init = 1;
+                }
             }
         }
         
@@ -456,46 +490,65 @@ int main(int argc, char** argv) {
 
         // 保存ESKF结果（仅当处理IMU或ODOM时）
         if (ev.type == Event::IMU || ev.type == Event::ODOM) {
+            // 先获取ESKF状态
             const auto& S = filter.getNominalState();
-            if (S.initialized) {
-                TelemetryState ts;
-                ts.t = S.timestamp;
-                ts.px = S.p.x(); ts.py = S.p.y(); ts.pz = S.p.z();
-                ts.vx = S.v.x(); ts.vy = S.v.y(); ts.vz = S.v.z();
-                ts.yaw_rad = YawFromQuatENU(S.q);
-                ts.initialized = true;
-                ts.paused = is_paused.load();
             
-                {
-                    std::lock_guard<std::mutex> lk(g_state_mtx);
-                    g_latest = ts;
-                }
+            // 再获取DR状态
+            double dr_time;
+            Eigen::Matrix4d dr_pose;
+            dr_filter.getPose(dr_time, dr_pose);
+            
+            // 构建完整的TelemetryStateMulti对象
+            TelemetryStateMulti ts;
+            ts.paused = is_paused.load();
+            
+            // 先复制上一次的GNSS数据（如果GNSS本次未更新，保留上一次的值）
+            {
+                std::lock_guard<std::mutex> lk(g_state_mtx);
+                ts.gnss = g_latest.gnss;
+            }
+            
+            // 设置ESKF轨迹
+            if (S.initialized) {
+                ts.t = S.timestamp;
+                ts.eskf.x = S.p.x();
+                ts.eskf.y = S.p.y();
+                ts.eskf.yaw = YawFromQuatENU(S.q);
+                ts.eskf.init = 1;
+                
                 // TUM格式：timestamp tx ty tz qx qy qz qw
                 eskf_fout << S.timestamp << " "
                          << S.p.x() << " " << S.p.y() << " " << S.p.z() << " "
                          << S.q.x() << " " << S.q.y() << " " << S.q.z() << " " << S.q.w()
                          << "\n";
             } else {
-                std::lock_guard<std::mutex> lk(g_state_mtx);
-                g_latest.paused = is_paused.load();
-                g_latest.initialized = false;
+                ts.eskf.init = 0;
             }
             
-            // 保存DR结果
-            double dr_time;
-            Eigen::Matrix4d dr_pose;
-            dr_filter.getPose(dr_time, dr_pose);
-            
+            // 设置DR轨迹
             if (dr_time > 0) {
                 Eigen::Vector3d dr_position = dr_pose.block<3,1>(0,3);
                 Eigen::Matrix3d dr_rotation = dr_pose.block<3,3>(0,0);
                 Eigen::Quaterniond dr_quat(dr_rotation);
+                
+                ts.dr.x = dr_position.x();
+                ts.dr.y = dr_position.y();
+                ts.dr.yaw = YawFromQuatENU(dr_quat);
+                ts.dr.init = 1;
                 
                 // TUM格式：timestamp tx ty tz qx qy qz qw
                 dr_fout << dr_time << " "
                        << dr_position.x() << " " << dr_position.y() << " " << dr_position.z() << " "
                        << dr_quat.x() << " " << dr_quat.y() << " " << dr_quat.z() << " " << dr_quat.w()
                        << "\n";
+            } else {
+                ts.dr.init = 0;
+            }
+            
+            // 最后一次性更新全局状态
+            {
+                std::lock_guard<std::mutex> lk(g_state_mtx);
+                g_latest = ts;
             }
         }
     }
