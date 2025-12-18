@@ -18,6 +18,20 @@ def rot2d(theta_rad: float) -> np.ndarray:
     return np.array([[c, -s],
                      [s,  c]], dtype=float)
 
+def rotate_xy_about_origin(xs, ys, deg, x0, y0):
+    """Rotate points (xs,ys) by deg around pivot (x0,y0). Returns (xr, yr)."""
+    if xs is None or ys is None:
+        return xs, ys
+    if len(xs) == 0:
+        return xs, ys
+    th = math.radians(float(deg))
+    c = math.cos(th); s = math.sin(th)
+    dx = xs - x0
+    dy = ys - y0
+    xr = x0 + c*dx - s*dy
+    yr = y0 + s*dx + c*dy
+    return xr, yr
+
 class MainWindow(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
@@ -53,7 +67,7 @@ class MainWindow(QtWidgets.QWidget):
         self.plot.setLabel("bottom", "x")
         self.plot.setLabel("left", "y")
 
-        # 多轨迹曲线（给不同线型，颜色由库自动分配）
+        # 多轨迹曲线（线型不同，颜色由库自动分配）
         self.curve_eskf = self.plot.plot([], [], pen=pg.mkPen(width=2), name="ESKF")
         self.curve_dr   = self.plot.plot([], [], pen=pg.mkPen(width=2, style=QtCore.Qt.DashLine), name="DR")
         self.curve_gnss = self.plot.plot([], [], pen=pg.mkPen(width=2, style=QtCore.Qt.DotLine), name="GNSS")
@@ -105,15 +119,29 @@ class MainWindow(QtWidgets.QWidget):
         self.cb_eskf = QtWidgets.QCheckBox("Show ESKF"); self.cb_eskf.setChecked(True)
         self.cb_dr   = QtWidgets.QCheckBox("Show DR");   self.cb_dr.setChecked(True)
         self.cb_gnss = QtWidgets.QCheckBox("Show GNSS"); self.cb_gnss.setChecked(True)
-
         self.cb_eskf.stateChanged.connect(self.redraw_current)
         self.cb_dr.stateChanged.connect(self.redraw_current)
         self.cb_gnss.stateChanged.connect(self.redraw_current)
 
         # Vehicle source selection
         self.pose_src_combo = QtWidgets.QComboBox()
-        self.pose_src_combo.addItems(["Vehicle from ESKF", "Vehicle from DR", "Vehicle from GNSS"])
+        self.pose_src_combo.addItems([
+            "Vehicle from ESKF",
+            "Vehicle from DR",
+            "Vehicle from GNSS (no heading)"
+        ])
         self.pose_src_combo.currentIndexChanged.connect(self.redraw_current)
+
+        # Per-track angle offsets (deg)
+        self.off_eskf = QtWidgets.QDoubleSpinBox()
+        self.off_dr   = QtWidgets.QDoubleSpinBox()
+        self.off_gnss = QtWidgets.QDoubleSpinBox()
+        for sp in (self.off_eskf, self.off_dr, self.off_gnss):
+            sp.setRange(-180.0, 180.0)
+            sp.setSingleStep(1.0)
+            sp.setDecimals(1)
+            sp.setValue(0.0)
+            sp.valueChanged.connect(self.redraw_current)
 
         # View controls
         self.mode_combo = QtWidgets.QComboBox()
@@ -158,8 +186,15 @@ class MainWindow(QtWidgets.QWidget):
         right.addWidget(self.cb_dr)
         right.addWidget(self.cb_gnss)
         right.addWidget(self.pose_src_combo)
-        right.addSpacing(10)
 
+        right.addSpacing(6)
+        right.addWidget(QtWidgets.QLabel("Angle Offsets (deg)"))
+        row1 = QtWidgets.QHBoxLayout(); row1.addWidget(QtWidgets.QLabel("ESKF")); row1.addWidget(self.off_eskf)
+        row2 = QtWidgets.QHBoxLayout(); row2.addWidget(QtWidgets.QLabel("DR"));   row2.addWidget(self.off_dr)
+        row3 = QtWidgets.QHBoxLayout(); row3.addWidget(QtWidgets.QLabel("GNSS")); row3.addWidget(self.off_gnss)
+        right.addLayout(row1); right.addLayout(row2); right.addLayout(row3)
+
+        right.addSpacing(10)
         right.addWidget(QtWidgets.QLabel("View Mode"))
         right.addWidget(self.mode_combo)
         roww = QtWidgets.QHBoxLayout()
@@ -270,16 +305,22 @@ class MainWindow(QtWidgets.QWidget):
         idx = int(np.clip(idx, 0, self.max_len() - 1))
         self.render_at_index(idx)
 
+    def track_offset_deg(self, key: str) -> float:
+        if key == "eskf": return float(self.off_eskf.value())
+        if key == "dr":   return float(self.off_dr.value())
+        if key == "gnss": return float(self.off_gnss.value())
+        return 0.0
+
     # ===== Rendering =====
     def update_view(self, xs_list, ys_list, px: float, py: float):
-        # xs_list/ys_list: list of arrays (maybe empty) for fit mode union
+        # Auto Follow: 只平移跟随，不改变缩放（保留当前 viewRange 宽高）
         if self.view_mode == "follow":
             vb = self.plot.getViewBox()
             (x0, x1), (y0, y1) = vb.viewRange()
             w = x1 - x0
             h = y1 - y0
 
-            # 如果一开始还没合适范围（比如刚启动 w/h 很小），用 fixed_window 初始化一次
+            # 初始时范围可能不合理，用 fixed_window 初始化一次
             if w < 1e-6 or h < 1e-6:
                 half = self.fixed_window * 0.5
                 vb.setRange(xRange=(px - half, px + half), yRange=(py - half, py + half), padding=0)
@@ -328,55 +369,70 @@ class MainWindow(QtWidgets.QWidget):
         j = min(idx, len(states) - 1)
         return states[j]  # (t,x,y,yaw_deg,init,paused)
 
+    def _track_pivot(self, key: str):
+        """Return (x0,y0) pivot for track rotation (its first point), or None."""
+        st = self.states_eskf if key == "eskf" else (self.states_dr if key == "dr" else self.states_gnss)
+        if len(st) == 0:
+            return None
+        return float(st[0][1]), float(st[0][2])
+
     def render_at_index(self, idx: int):
         idx = int(np.clip(idx, 0, self.max_len() - 1))
 
-        # --- curves ---
+        # --- curves (apply per-track offset around each track's first point) ---
         xs_eskf = ys_eskf = None
         xs_dr   = ys_dr   = None
         xs_gnss = ys_gnss = None
 
         if self.cb_eskf.isChecked():
             xs_eskf, ys_eskf = self._curve_data_until(self.states_eskf, idx)
+            if xs_eskf is not None and len(xs_eskf) > 0:
+                x0, y0 = float(xs_eskf[0]), float(ys_eskf[0])
+                xs_eskf, ys_eskf = rotate_xy_about_origin(xs_eskf, ys_eskf, self.track_offset_deg("eskf"), x0, y0)
             self.curve_eskf.setData(xs_eskf if xs_eskf is not None else [], ys_eskf if ys_eskf is not None else [])
         else:
             self.curve_eskf.setData([], [])
 
         if self.cb_dr.isChecked():
             xs_dr, ys_dr = self._curve_data_until(self.states_dr, idx)
+            if xs_dr is not None and len(xs_dr) > 0:
+                x0, y0 = float(xs_dr[0]), float(ys_dr[0])
+                xs_dr, ys_dr = rotate_xy_about_origin(xs_dr, ys_dr, self.track_offset_deg("dr"), x0, y0)
             self.curve_dr.setData(xs_dr if xs_dr is not None else [], ys_dr if ys_dr is not None else [])
         else:
             self.curve_dr.setData([], [])
 
         if self.cb_gnss.isChecked():
             xs_gnss, ys_gnss = self._curve_data_until(self.states_gnss, idx)
+            if xs_gnss is not None and len(xs_gnss) > 0:
+                x0, y0 = float(xs_gnss[0]), float(ys_gnss[0])
+                xs_gnss, ys_gnss = rotate_xy_about_origin(xs_gnss, ys_gnss, self.track_offset_deg("gnss"), x0, y0)
             self.curve_gnss.setData(xs_gnss if xs_gnss is not None else [], ys_gnss if ys_gnss is not None else [])
         else:
             self.curve_gnss.setData([], [])
 
+        # --- choose vehicle pose source ---
         src = self.pose_src_combo.currentIndex()
 
         pose = None
         pose_is_gnss = False
+        src_key = "eskf"
 
         if src == 0:  # ESKF
-            pose = self._pose_at(self.states_eskf, idx)
-            if pose is None:
-                pose = self._pose_at(self.states_dr, idx)
+            src_key = "eskf"
+            pose = self._pose_at(self.states_eskf, idx) or self._pose_at(self.states_dr, idx)
         elif src == 1:  # DR
-            pose = self._pose_at(self.states_dr, idx)
-            if pose is None:
-                pose = self._pose_at(self.states_eskf, idx)
+            src_key = "dr"
+            pose = self._pose_at(self.states_dr, idx) or self._pose_at(self.states_eskf, idx)
         else:  # GNSS (no heading)
+            src_key = "gnss"
             pose = self._pose_at(self.states_gnss, idx)
             pose_is_gnss = True
             if pose is None:
-                # GNSS没数据就fallback到ESKF/DR
                 pose = self._pose_at(self.states_eskf, idx) or self._pose_at(self.states_dr, idx)
                 pose_is_gnss = False
+                src_key = "eskf" if self._pose_at(self.states_eskf, idx) is not None else "dr"
 
-
-        # --- update labels & vehicle ---
         if pose is None:
             self.yaw_label.setText("yaw: --- deg")
             self.slider_info.setText(f"{idx+1} / {self.max_len()}")
@@ -384,6 +440,20 @@ class MainWindow(QtWidgets.QWidget):
 
         t, px, py, yaw_deg, init, paused = pose
 
+        # --- apply offset to pose position & yaw to match rotated display ---
+        pivot = self._track_pivot(src_key)
+        off = self.track_offset_deg(src_key)
+        if pivot is not None:
+            x0, y0 = pivot
+            px_arr = np.array([px], dtype=float)
+            py_arr = np.array([py], dtype=float)
+            pxr, pyr = rotate_xy_about_origin(px_arr, py_arr, off, x0, y0)
+            px, py = float(pxr[0]), float(pyr[0])
+
+        # yaw 加 offset（GNSS 也加无所谓，但 GNSS 不画车体）
+        yaw_deg = wrap_deg(yaw_deg + off)
+
+        # --- labels ---
         self.mode_label.setText("mode: LIVE" if self.live else "mode: HISTORY")
         self.slider_info.setText(f"{idx+1} / {self.max_len()}")
 
@@ -391,7 +461,8 @@ class MainWindow(QtWidgets.QWidget):
         self.state_label.setText(f"state: {'PAUSED' if int(paused) else 'RUN'} | init: {int(init)}")
         self.pos_label.setText(f"pos: [{px:.3f}, {py:.3f}, 0.000]")
 
-        if int(init) == 0:
+        if int(init) == 0 or pose_is_gnss:
+            # GNSS 本身没有可靠 yaw，直接不显示 yaw
             self.yaw_label.setText("yaw: --- deg")
         else:
             self.yaw_label.setText(f"yaw: {wrap_deg(yaw_deg):+.2f} deg")
@@ -400,8 +471,7 @@ class MainWindow(QtWidgets.QWidget):
         self.pos_scatter.setData([px], [py])
 
         # vehicle triangle
-        if pose_is_gnss:
-            # GNSS 没有航向：不画车体（三角形）
+        if pose_is_gnss or int(init) == 0:
             self.vehicle_item.setData([], [])
         else:
             theta = math.radians(yaw_deg)
@@ -413,27 +483,26 @@ class MainWindow(QtWidgets.QWidget):
                 brush=pg.mkBrush(50, 150, 255, 120)
             )
 
-        # view update
+        # view update (fit uses the rotated curves we already computed)
         xs_list = [xs_eskf if self.cb_eskf.isChecked() else None,
                    xs_dr   if self.cb_dr.isChecked()   else None,
                    xs_gnss if self.cb_gnss.isChecked() else None]
         ys_list = [ys_eskf if self.cb_eskf.isChecked() else None,
                    ys_dr   if self.cb_dr.isChecked()   else None,
                    ys_gnss if self.cb_gnss.isChecked() else None]
-
         self.update_view(xs_list, ys_list, px, py)
 
     # ===== Telemetry parsing =====
     def _push_track(self, key: str, obj: dict, store: list, t: float, paused: int):
         tr = obj.get(key, None)
         if not isinstance(tr, dict):
-            # 如果该轨迹本帧没发，就不 push（保持长度可能不同）
             return
 
         init = int(tr.get("init", 0))
         x = float(tr.get("x", 0.0))
         y = float(tr.get("y", 0.0))
         yaw_rad = tr.get("yaw", 0.0)
+
         if init != 0 and yaw_rad is not None:
             yaw_deg = wrap_deg(float(yaw_rad) * 180.0 / math.pi)
         else:
@@ -441,7 +510,6 @@ class MainWindow(QtWidgets.QWidget):
 
         store.append((t, x, y, yaw_deg, float(init), float(paused)))
 
-        # 限长（每条轨迹单独限）
         MAX_N = 50000
         if len(store) > MAX_N:
             del store[:len(store) - MAX_N]
@@ -460,11 +528,9 @@ class MainWindow(QtWidgets.QWidget):
             except Exception:
                 continue
 
-            # 新协议字段：t, paused, eskf/dr/gnss
             t = float(obj.get("t", 0.0))
             paused = int(obj.get("paused", 0))
 
-            # 去重：按 t 去重（同一时刻只收一次）
             if self.last_t is not None and abs(t - self.last_t) <= 1e-9:
                 continue
 
@@ -485,7 +551,6 @@ class MainWindow(QtWidgets.QWidget):
         max_idx = max_len - 1
         self.slider.setMaximum(max_idx)
 
-        # LIVE 模式：始终显示最新
         if self.live and not self.scrubbing:
             self.selected_idx = max_idx
             self.slider.blockSignals(True)
@@ -496,6 +561,6 @@ class MainWindow(QtWidgets.QWidget):
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
     w = MainWindow()
-    w.resize(1200, 650)
+    w.resize(1250, 680)
     w.show()
     sys.exit(app.exec_())
