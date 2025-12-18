@@ -67,10 +67,27 @@ class MainWindow(QtWidgets.QWidget):
         self.plot.setLabel("bottom", "x")
         self.plot.setLabel("left", "y")
 
-        # 多轨迹曲线
-        self.curve_eskf = self.plot.plot([], [], pen=pg.mkPen(width=2), name="ESKF")
-        self.curve_dr   = self.plot.plot([], [], pen=pg.mkPen(width=2, style=QtCore.Qt.DashLine), name="DR")
-        self.curve_gnss = self.plot.plot([], [], pen=pg.mkPen(width=2, style=QtCore.Qt.DotLine), name="GNSS")
+        # Legend + fixed colors
+        self.legend = self.plot.addLegend()
+        
+        self.curve_eskf = self.plot.plot([], [], pen=pg.mkPen((50,150,255), width=2), name="ESKF")
+        self.curve_dr   = self.plot.plot([], [], pen=pg.mkPen((255,120,50), width=2, style=QtCore.Qt.DashLine), name="DR")
+        self.curve_gnss = self.plot.plot([], [], pen=pg.mkPen((80,220,120), width=2, style=QtCore.Qt.DotLine), name="GNSS")
+
+        # Track render mode: line | points | both
+        self.track_draw_mode = "line"
+
+        self.draw_mode_combo = QtWidgets.QComboBox()
+        self.draw_mode_combo.addItems(["Line", "Points", "Line + Points"])
+        self.draw_mode_combo.currentIndexChanged.connect(self.on_draw_mode_changed)
+
+        # Scatter items for each track (points mode)
+        self.scat_eskf = pg.ScatterPlotItem(size=4, pen=None)
+        self.scat_dr   = pg.ScatterPlotItem(size=4, pen=None)
+        self.scat_gnss = pg.ScatterPlotItem(size=4, pen=None)
+        self.plot.addItem(self.scat_eskf)
+        self.plot.addItem(self.scat_dr)
+        self.plot.addItem(self.scat_gnss)
 
         # 当前中心点
         self.pos_scatter = pg.ScatterPlotItem(size=8, pen=None)
@@ -81,7 +98,7 @@ class MainWindow(QtWidgets.QWidget):
         self.plot.addItem(self.vehicle_item)
 
         # 车体形状（局部坐标）：车头朝 +X
-        self.vehicle_scale = 1.0
+        self.vehicle_scale = 0.1
         self.vehicle_shape_local = np.array([
             [ 1.0,  0.0],
             [-0.7,  0.5],
@@ -98,6 +115,13 @@ class MainWindow(QtWidgets.QWidget):
         self.measure_points = []   # [(x,y), (x,y)]
         self.measure_scatter = pg.ScatterPlotItem(size=10, pen=pg.mkPen(width=2))
         self.plot.addItem(self.measure_scatter)
+
+        # Measure preview/final line
+        self.measure_line = pg.PlotDataItem([], [], pen=pg.mkPen(width=1))
+        self.plot.addItem(self.measure_line)
+
+        # Keep last mouse pos in plot coordinates
+        self.mouse_xy = None
 
         # Enable mouse tracking & clicks on the plot
         self.plot.scene().sigMouseMoved.connect(self.on_mouse_moved)
@@ -184,6 +208,10 @@ class MainWindow(QtWidgets.QWidget):
 
         # Layout
         right = QtWidgets.QVBoxLayout()
+
+        right.addWidget(QtWidgets.QLabel("Track Draw Mode"))
+        right.addWidget(self.draw_mode_combo)
+
         right.addWidget(self.yaw_label)
         right.addWidget(self.mode_label)
         right.addWidget(self.state_label)
@@ -248,27 +276,24 @@ class MainWindow(QtWidgets.QWidget):
         self.rate_timer.timeout.connect(self.update_rate)
         self.rate_timer.start(500)
 
+    def on_draw_mode_changed(self, idx: int):
+        if idx == 0:
+            self.track_draw_mode = "line"
+        elif idx == 1:
+            self.track_draw_mode = "points"
+        else:
+            self.track_draw_mode = "both"
+        self.redraw_current()
+
+
     # ===== Measure Tool =====
     def toggle_measure_mode(self):
-        # 进入测距：清空旧点，准备新一轮
-        if not self.measure_mode:
-            self.measure_mode = True
-            self.measure_points = []
-            self.measure_scatter.setData([], [])
-            self.measure_label.setText("measure: click point A")
-        else:
-            # 手动退出也行：退出但保留已选点（按你要求：直到 clear 或再次进入）
-            self.measure_mode = False
-            if len(self.measure_points) == 0:
-                self.measure_label.setText("measure: ---")
-            elif len(self.measure_points) == 1:
-                self.measure_label.setText("measure: point A set (click again to restart)")
-            else:
-                # 两点已经选完，通常不会到这，因为选完会自动退出
-                ax, ay = self.measure_points[0]
-                bx, by = self.measure_points[1]
-                d = math.hypot(bx-ax, by-ay)
-                self.measure_label.setText(f"measure: dist = {d:.3f}")
+        # 再次点击：重新开始新一轮测距（清空旧点与线）
+        self.measure_mode = True
+        self.measure_points = []
+        self.measure_scatter.setData([], [])
+        self.measure_line.setData([], [])
+        self.measure_label.setText("measure: click point A")
 
     def on_mouse_moved(self, pos):
         vb = self.plot.getViewBox()
@@ -280,7 +305,6 @@ class MainWindow(QtWidgets.QWidget):
     def on_mouse_clicked(self, evt):
         if not self.measure_mode:
             return
-        # 只响应左键
         if evt.button() != QtCore.Qt.LeftButton:
             return
 
@@ -292,19 +316,26 @@ class MainWindow(QtWidgets.QWidget):
 
         self.measure_points.append((x, y))
 
-        # 更新显示点（保留在画布上）
+        # 更新点显示
         xs = [pt[0] for pt in self.measure_points]
         ys = [pt[1] for pt in self.measure_points]
         self.measure_scatter.setData(xs, ys)
 
         if len(self.measure_points) == 1:
-            self.measure_label.setText("measure: point A set, click point B")
+            self.measure_label.setText(f"measure: A=({x:.3f},{y:.3f})  click point B")
+            # 先画一个零长度线，后续 on_mouse_moved 会更新成预览线
+            self.measure_line.setData([x, x], [y, y])
+
         elif len(self.measure_points) == 2:
             ax, ay = self.measure_points[0]
             bx, by = self.measure_points[1]
             d = math.hypot(bx - ax, by - ay)
-            self.measure_label.setText(f"measure: dist = {d:.3f}")
-            # 选完两点自动退出（保留点）
+            self.measure_label.setText(
+                f"measure: A=({ax:.3f},{ay:.3f})  B=({bx:.3f},{by:.3f})  dist={d:.3f}"
+            )
+            # 固化最终线
+            self.measure_line.setData([ax, bx], [ay, by])
+            # 选完两点自动退出（保留点与线）
             self.measure_mode = False
 
     # ===== Utils =====
@@ -465,34 +496,73 @@ class MainWindow(QtWidgets.QWidget):
         xs_dr   = ys_dr   = None
         xs_gnss = ys_gnss = None
 
+        # -------- ESKF --------
         if self.cb_eskf.isChecked():
             xs_eskf, ys_eskf = self._curve_data_until(self.states_eskf, idx)
             if xs_eskf is not None and len(xs_eskf) > 0:
                 x0, y0 = float(xs_eskf[0]), float(ys_eskf[0])
-                xs_eskf, ys_eskf = rotate_xy_about_origin(xs_eskf, ys_eskf, self.track_offset_deg("eskf"), x0, y0)
-            self.curve_eskf.setData(xs_eskf if xs_eskf is not None else [], ys_eskf if ys_eskf is not None else [])
-        else:
+                xs_eskf, ys_eskf = rotate_xy_about_origin(
+                    xs_eskf, ys_eskf, self.track_offset_deg("eskf"), x0, y0
+                )
+        # apply draw mode
+        if (not self.cb_eskf.isChecked()) or xs_eskf is None or ys_eskf is None or len(xs_eskf) == 0:
             self.curve_eskf.setData([], [])
+            self.scat_eskf.setData([], [])
+        else:
+            if self.track_draw_mode in ("line", "both"):
+                self.curve_eskf.setData(xs_eskf, ys_eskf)
+            else:
+                self.curve_eskf.setData([], [])
+            if self.track_draw_mode in ("points", "both"):
+                self.scat_eskf.setData(xs_eskf, ys_eskf)
+            else:
+                self.scat_eskf.setData([], [])
 
+        # -------- DR --------
         if self.cb_dr.isChecked():
             xs_dr, ys_dr = self._curve_data_until(self.states_dr, idx)
             if xs_dr is not None and len(xs_dr) > 0:
                 x0, y0 = float(xs_dr[0]), float(ys_dr[0])
-                xs_dr, ys_dr = rotate_xy_about_origin(xs_dr, ys_dr, self.track_offset_deg("dr"), x0, y0)
-            self.curve_dr.setData(xs_dr if xs_dr is not None else [], ys_dr if ys_dr is not None else [])
-        else:
+                xs_dr, ys_dr = rotate_xy_about_origin(
+                    xs_dr, ys_dr, self.track_offset_deg("dr"), x0, y0
+                )
+        # apply draw mode
+        if (not self.cb_dr.isChecked()) or xs_dr is None or ys_dr is None or len(xs_dr) == 0:
             self.curve_dr.setData([], [])
+            self.scat_dr.setData([], [])
+        else:
+            if self.track_draw_mode in ("line", "both"):
+                self.curve_dr.setData(xs_dr, ys_dr)
+            else:
+                self.curve_dr.setData([], [])
+            if self.track_draw_mode in ("points", "both"):
+                self.scat_dr.setData(xs_dr, ys_dr)
+            else:
+                self.scat_dr.setData([], [])
 
+        # -------- GNSS --------
         if self.cb_gnss.isChecked():
             xs_gnss, ys_gnss = self._curve_data_until(self.states_gnss, idx)
             if xs_gnss is not None and len(xs_gnss) > 0:
                 x0, y0 = float(xs_gnss[0]), float(ys_gnss[0])
-                xs_gnss, ys_gnss = rotate_xy_about_origin(xs_gnss, ys_gnss, self.track_offset_deg("gnss"), x0, y0)
-            self.curve_gnss.setData(xs_gnss if xs_gnss is not None else [], ys_gnss if ys_gnss is not None else [])
-        else:
+                xs_gnss, ys_gnss = rotate_xy_about_origin(
+                    xs_gnss, ys_gnss, self.track_offset_deg("gnss"), x0, y0
+                )
+        # apply draw mode
+        if (not self.cb_gnss.isChecked()) or xs_gnss is None or ys_gnss is None or len(xs_gnss) == 0:
             self.curve_gnss.setData([], [])
+            self.scat_gnss.setData([], [])
+        else:
+            if self.track_draw_mode in ("line", "both"):
+                self.curve_gnss.setData(xs_gnss, ys_gnss)
+            else:
+                self.curve_gnss.setData([], [])
+            if self.track_draw_mode in ("points", "both"):
+                self.scat_gnss.setData(xs_gnss, ys_gnss)
+            else:
+                self.scat_gnss.setData([], [])
 
-        # choose pose source
+        # -------- choose pose source --------
         src = self.pose_src_combo.currentIndex()
         pose = None
         pose_is_gnss = False
@@ -520,7 +590,7 @@ class MainWindow(QtWidgets.QWidget):
 
         t, px, py, yaw_deg, init, paused = pose
 
-        # apply offset to pose position & yaw
+        # -------- apply offset to pose position & yaw (match rotated display) --------
         pivot = self._track_pivot(src_key)
         off = self.track_offset_deg(src_key)
         if pivot is not None:
@@ -532,7 +602,7 @@ class MainWindow(QtWidgets.QWidget):
 
         yaw_deg = wrap_deg(yaw_deg + off)
 
-        # labels
+        # -------- labels --------
         self.mode_label.setText("mode: LIVE" if self.live else "mode: HISTORY")
         self.slider_info.setText(f"{idx+1} / {self.max_len()}")
 
@@ -548,7 +618,7 @@ class MainWindow(QtWidgets.QWidget):
         # center dot
         self.pos_scatter.setData([px], [py])
 
-        # vehicle triangle
+        # -------- vehicle triangle --------
         if pose_is_gnss or int(init) == 0:
             self.vehicle_item.setData([], [])
         else:
@@ -561,13 +631,13 @@ class MainWindow(QtWidgets.QWidget):
                 brush=pg.mkBrush(50, 150, 255, 120)
             )
 
-        # view update
+        # -------- view update --------
         xs_list = [xs_eskf if self.cb_eskf.isChecked() else None,
-                   xs_dr   if self.cb_dr.isChecked()   else None,
-                   xs_gnss if self.cb_gnss.isChecked() else None]
+                xs_dr   if self.cb_dr.isChecked()   else None,
+                xs_gnss if self.cb_gnss.isChecked() else None]
         ys_list = [ys_eskf if self.cb_eskf.isChecked() else None,
-                   ys_dr   if self.cb_dr.isChecked()   else None,
-                   ys_gnss if self.cb_gnss.isChecked() else None]
+                ys_dr   if self.cb_dr.isChecked()   else None,
+                ys_gnss if self.cb_gnss.isChecked() else None]
         self.update_view(xs_list, ys_list, px, py)
 
     # ===== Telemetry parsing =====
