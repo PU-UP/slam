@@ -18,9 +18,154 @@
 #include "dr/dr_odo_flow.hpp"
 #include "eskf/eskf.hpp"
 
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <mutex>
+#include <sstream>
+
+// ====== 共享的最新状态（发给Python） ======
+struct TelemetryState {
+    double t{0};
+    double px{0}, py{0}, pz{0};
+    double vx{0}, vy{0}, vz{0};
+    double yaw_rad{0};
+    bool initialized{false};
+    bool paused{false};
+};
+
+std::mutex g_state_mtx;
+TelemetryState g_latest;
+
 // 全局控制变量
 std::atomic<bool> is_paused(false);
 std::atomic<bool> should_exit(false);
+
+// ====== yaw 计算：假设 ENU / z-up（如果你的坐标不同再调整） ======
+inline double YawFromQuatENU(const Eigen::Quaterniond& q) {
+    // yaw (Z axis)
+    double siny_cosp = 2.0 * (q.w() * q.z() + q.x() * q.y());
+    double cosy_cosp = 1.0 - 2.0 * (q.y() * q.y() + q.z() * q.z());
+    return std::atan2(siny_cosp, cosy_cosp);
+}
+
+class UdpTelemetrySender {
+    public:
+        UdpTelemetrySender(const std::string& ip, int port, double hz)
+            : ip_(ip), port_(port), period_ms_((int)(1000.0 / hz)) {}
+    
+        bool start() {
+            sock_ = ::socket(AF_INET, SOCK_DGRAM, 0);
+            if (sock_ < 0) return false;
+    
+            std::memset(&addr_, 0, sizeof(addr_));
+            addr_.sin_family = AF_INET;
+            addr_.sin_port = htons(port_);
+            inet_pton(AF_INET, ip_.c_str(), &addr_.sin_addr);
+    
+            th_ = std::thread([this](){ this->loop(); });
+            th_.detach();
+            return true;
+        }
+    
+    private:
+        void loop() {
+            while (!should_exit.load()) {
+                TelemetryState s;
+                {
+                    std::lock_guard<std::mutex> lk(g_state_mtx);
+                    s = g_latest;
+                }
+    
+                // 简单 JSON（手写拼接，够用）
+                std::ostringstream oss;
+                oss.setf(std::ios::fixed); oss<<std::setprecision(6);
+                oss << "{"
+                    << "\"t\":" << s.t
+                    << ",\"px\":" << s.px << ",\"py\":" << s.py << ",\"pz\":" << s.pz
+                    << ",\"vx\":" << s.vx << ",\"vy\":" << s.vy << ",\"vz\":" << s.vz
+                    << ",\"yaw\":" << s.yaw_rad
+                    << ",\"init\":" << (s.initialized?1:0)
+                    << ",\"paused\":" << (s.paused?1:0)
+                    << "}";
+    
+                std::string msg = oss.str();
+                ::sendto(sock_, msg.data(), msg.size(), 0,
+                         (struct sockaddr*)&addr_, sizeof(addr_));
+    
+                std::this_thread::sleep_for(std::chrono::milliseconds(period_ms_));
+            }
+            ::close(sock_);
+        }
+    
+    private:
+        std::string ip_;
+        int port_;
+        int period_ms_;
+        int sock_{-1};
+        sockaddr_in addr_{};
+        std::thread th_;
+};
+
+class UdpControlReceiver {
+    public:
+        UdpControlReceiver(int listen_port) : port_(listen_port) {}
+    
+        bool start() {
+            sock_ = ::socket(AF_INET, SOCK_DGRAM, 0);
+            if (sock_ < 0) return false;
+    
+            sockaddr_in addr{};
+            addr.sin_family = AF_INET;
+            addr.sin_addr.s_addr = INADDR_ANY;
+            addr.sin_port = htons(port_);
+    
+            if (bind(sock_, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+                ::close(sock_);
+                return false;
+            }
+    
+            th_ = std::thread([this](){ this->loop(); });
+            th_.detach();
+            return true;
+        }
+    
+    private:
+        void loop() {
+            char buf[1024];
+            while (!should_exit.load()) {
+                sockaddr_in src{};
+                socklen_t slen = sizeof(src);
+                int n = ::recvfrom(sock_, buf, sizeof(buf)-1, 0, (sockaddr*)&src, &slen);
+                if (n <= 0) continue;
+                buf[n] = '\0';
+                std::string msg(buf);
+    
+                // 超轻量解析：只做 contains
+                if (msg.find("\"cmd\":\"quit\"") != std::string::npos) {
+                    should_exit.store(true);
+                    is_paused.store(false);
+                    std::cout << "\n[UDP] quit\n";
+                } else if (msg.find("\"cmd\":\"pause\"") != std::string::npos) {
+                    is_paused.store(true);
+                    std::cout << "\n[UDP] pause\n";
+                } else if (msg.find("\"cmd\":\"resume\"") != std::string::npos) {
+                    is_paused.store(false);
+                    std::cout << "\n[UDP] resume\n";
+                } else if (msg.find("\"cmd\":\"toggle_pause\"") != std::string::npos) {
+                    is_paused.store(!is_paused.load());
+                    std::cout << "\n[UDP] toggle_pause -> " << (is_paused.load()?"paused":"running") << "\n";
+                }
+            }
+            ::close(sock_);
+        }
+    
+    private:
+        int port_;
+        int sock_{-1};
+        std::thread th_;
+};
+    
 
 // 键盘输入处理函数
 void keyboardInputHandler() {
@@ -214,6 +359,19 @@ int main(int argc, char** argv) {
     // 启动键盘输入处理线程
     std::thread keyboard_thread(keyboardInputHandler);
     keyboard_thread.detach();
+
+    // 端口约定：
+    // C++ -> Python telemetry: 19001
+    // Python -> C++ control:   19002
+    UdpTelemetrySender telemetry("127.0.0.1", 19001, 20.0); // 20Hz
+    if (!telemetry.start()) {
+        std::cerr << "Telemetry UDP start failed\n";
+    }
+    UdpControlReceiver control(19002);
+    if (!control.start()) {
+        std::cerr << "Control UDP start failed\n";
+    }
+
     
     while (!pq.empty() && !should_exit.load()) {
         // 检查暂停状态
@@ -300,11 +458,27 @@ int main(int argc, char** argv) {
         if (ev.type == Event::IMU || ev.type == Event::ODOM) {
             const auto& S = filter.getNominalState();
             if (S.initialized) {
+                TelemetryState ts;
+                ts.t = S.timestamp;
+                ts.px = S.p.x(); ts.py = S.p.y(); ts.pz = S.p.z();
+                ts.vx = S.v.x(); ts.vy = S.v.y(); ts.vz = S.v.z();
+                ts.yaw_rad = YawFromQuatENU(S.q);
+                ts.initialized = true;
+                ts.paused = is_paused.load();
+            
+                {
+                    std::lock_guard<std::mutex> lk(g_state_mtx);
+                    g_latest = ts;
+                }
                 // TUM格式：timestamp tx ty tz qx qy qz qw
                 eskf_fout << S.timestamp << " "
                          << S.p.x() << " " << S.p.y() << " " << S.p.z() << " "
                          << S.q.x() << " " << S.q.y() << " " << S.q.z() << " " << S.q.w()
                          << "\n";
+            } else {
+                std::lock_guard<std::mutex> lk(g_state_mtx);
+                g_latest.paused = is_paused.load();
+                g_latest.initialized = false;
             }
             
             // 保存DR结果
