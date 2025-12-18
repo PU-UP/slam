@@ -67,12 +67,12 @@ class MainWindow(QtWidgets.QWidget):
         self.plot.setLabel("bottom", "x")
         self.plot.setLabel("left", "y")
 
-        # 多轨迹曲线（线型不同，颜色由库自动分配）
+        # 多轨迹曲线
         self.curve_eskf = self.plot.plot([], [], pen=pg.mkPen(width=2), name="ESKF")
         self.curve_dr   = self.plot.plot([], [], pen=pg.mkPen(width=2, style=QtCore.Qt.DashLine), name="DR")
         self.curve_gnss = self.plot.plot([], [], pen=pg.mkPen(width=2, style=QtCore.Qt.DotLine), name="GNSS")
 
-        # 当前中心点（显示“车体来源”的当前位置）
+        # 当前中心点
         self.pos_scatter = pg.ScatterPlotItem(size=8, pen=None)
         self.plot.addItem(self.pos_scatter)
 
@@ -93,6 +93,16 @@ class MainWindow(QtWidgets.QWidget):
         self.view_mode = "follow"   # follow | fit | fixed
         self.fixed_window = 40.0
 
+        # ====== Measure tool state ======
+        self.measure_mode = False
+        self.measure_points = []   # [(x,y), (x,y)]
+        self.measure_scatter = pg.ScatterPlotItem(size=10, pen=pg.mkPen(width=2))
+        self.plot.addItem(self.measure_scatter)
+
+        # Enable mouse tracking & clicks on the plot
+        self.plot.scene().sigMouseMoved.connect(self.on_mouse_moved)
+        self.plot.scene().sigMouseClicked.connect(self.on_mouse_clicked)
+
         # Right panel labels
         self.yaw_label = QtWidgets.QLabel("yaw: --- deg")
         self.yaw_label.setStyleSheet("font-size: 24px; font-weight: 600;")
@@ -102,18 +112,25 @@ class MainWindow(QtWidgets.QWidget):
         self.pos_label = QtWidgets.QLabel("pos: ---")
         self.rate_label = QtWidgets.QLabel("rx: --- Hz")
 
+        # Mouse / measure labels
+        self.mouse_label = QtWidgets.QLabel("mouse: (---, ---)")
+        self.measure_label = QtWidgets.QLabel("measure: ---")
+        self.measure_label.setStyleSheet("font-size: 14px; font-weight: 600;")
+
         # Buttons
         btn_pause  = QtWidgets.QPushButton("Pause")
         btn_resume = QtWidgets.QPushButton("Resume")
         btn_quit   = QtWidgets.QPushButton("Quit")
         btn_clear  = QtWidgets.QPushButton("Clear Track")
         btn_back_now = QtWidgets.QPushButton("Back to Now")
+        btn_measure = QtWidgets.QPushButton("Measure Distance")
 
         btn_pause.clicked.connect(lambda: self.send_cmd("pause"))
         btn_resume.clicked.connect(lambda: self.send_cmd("resume"))
         btn_quit.clicked.connect(lambda: self.send_cmd("quit"))
         btn_clear.clicked.connect(self.clear_track)
         btn_back_now.clicked.connect(self.back_to_now)
+        btn_measure.clicked.connect(self.toggle_measure_mode)
 
         # Track visibility checkboxes
         self.cb_eskf = QtWidgets.QCheckBox("Show ESKF"); self.cb_eskf.setChecked(True)
@@ -173,14 +190,19 @@ class MainWindow(QtWidgets.QWidget):
         right.addWidget(self.t_label)
         right.addWidget(self.pos_label)
         right.addWidget(self.rate_label)
-        right.addSpacing(10)
 
+        right.addSpacing(6)
+        right.addWidget(self.mouse_label)
+        right.addWidget(self.measure_label)
+        right.addWidget(btn_measure)
+
+        right.addSpacing(10)
         right.addWidget(QtWidgets.QLabel("Progress (scrub history)"))
         right.addWidget(self.slider)
         right.addWidget(self.slider_info)
         right.addWidget(btn_back_now)
-        right.addSpacing(10)
 
+        right.addSpacing(10)
         right.addWidget(QtWidgets.QLabel("Tracks"))
         right.addWidget(self.cb_eskf)
         right.addWidget(self.cb_dr)
@@ -201,8 +223,8 @@ class MainWindow(QtWidgets.QWidget):
         roww.addWidget(QtWidgets.QLabel("Window"))
         roww.addWidget(self.window_spin)
         right.addLayout(roww)
-        right.addSpacing(10)
 
+        right.addSpacing(10)
         row_btn = QtWidgets.QHBoxLayout()
         row_btn.addWidget(btn_pause)
         row_btn.addWidget(btn_resume)
@@ -225,6 +247,65 @@ class MainWindow(QtWidgets.QWidget):
         self.rate_timer = QtCore.QTimer(self)
         self.rate_timer.timeout.connect(self.update_rate)
         self.rate_timer.start(500)
+
+    # ===== Measure Tool =====
+    def toggle_measure_mode(self):
+        # 进入测距：清空旧点，准备新一轮
+        if not self.measure_mode:
+            self.measure_mode = True
+            self.measure_points = []
+            self.measure_scatter.setData([], [])
+            self.measure_label.setText("measure: click point A")
+        else:
+            # 手动退出也行：退出但保留已选点（按你要求：直到 clear 或再次进入）
+            self.measure_mode = False
+            if len(self.measure_points) == 0:
+                self.measure_label.setText("measure: ---")
+            elif len(self.measure_points) == 1:
+                self.measure_label.setText("measure: point A set (click again to restart)")
+            else:
+                # 两点已经选完，通常不会到这，因为选完会自动退出
+                ax, ay = self.measure_points[0]
+                bx, by = self.measure_points[1]
+                d = math.hypot(bx-ax, by-ay)
+                self.measure_label.setText(f"measure: dist = {d:.3f}")
+
+    def on_mouse_moved(self, pos):
+        vb = self.plot.getViewBox()
+        if vb is None:
+            return
+        p = vb.mapSceneToView(pos)
+        self.mouse_label.setText(f"mouse: ({p.x():.3f}, {p.y():.3f})")
+
+    def on_mouse_clicked(self, evt):
+        if not self.measure_mode:
+            return
+        # 只响应左键
+        if evt.button() != QtCore.Qt.LeftButton:
+            return
+
+        vb = self.plot.getViewBox()
+        if vb is None:
+            return
+        p = vb.mapSceneToView(evt.scenePos())
+        x, y = float(p.x()), float(p.y())
+
+        self.measure_points.append((x, y))
+
+        # 更新显示点（保留在画布上）
+        xs = [pt[0] for pt in self.measure_points]
+        ys = [pt[1] for pt in self.measure_points]
+        self.measure_scatter.setData(xs, ys)
+
+        if len(self.measure_points) == 1:
+            self.measure_label.setText("measure: point A set, click point B")
+        elif len(self.measure_points) == 2:
+            ax, ay = self.measure_points[0]
+            bx, by = self.measure_points[1]
+            d = math.hypot(bx - ax, by - ay)
+            self.measure_label.setText(f"measure: dist = {d:.3f}")
+            # 选完两点自动退出（保留点）
+            self.measure_mode = False
 
     # ===== Utils =====
     def send_cmd(self, cmd: str):
@@ -277,6 +358,12 @@ class MainWindow(QtWidgets.QWidget):
         self.pos_scatter.setData([])
         self.vehicle_item.setData([], [])
 
+        # clear measure points too
+        self.measure_points = []
+        self.measure_scatter.setData([], [])
+        self.measure_label.setText("measure: ---")
+        self.measure_mode = False
+
         self.slider.setMaximum(0)
         self.slider.setValue(0)
         self.slider_info.setText("0 / 0")
@@ -313,14 +400,12 @@ class MainWindow(QtWidgets.QWidget):
 
     # ===== Rendering =====
     def update_view(self, xs_list, ys_list, px: float, py: float):
-        # Auto Follow: 只平移跟随，不改变缩放（保留当前 viewRange 宽高）
+        # Auto Follow: 只平移跟随，不改变缩放
         if self.view_mode == "follow":
             vb = self.plot.getViewBox()
             (x0, x1), (y0, y1) = vb.viewRange()
             w = x1 - x0
             h = y1 - y0
-
-            # 初始时范围可能不合理，用 fixed_window 初始化一次
             if w < 1e-6 or h < 1e-6:
                 half = self.fixed_window * 0.5
                 vb.setRange(xRange=(px - half, px + half), yRange=(py - half, py + half), padding=0)
@@ -334,7 +419,7 @@ class MainWindow(QtWidgets.QWidget):
             self.plot.setYRange(py - half, py + half, padding=0)
             return
 
-        # fit: 用当前“显示开启”的轨迹联合范围
+        # fit: union
         xs_all = []
         ys_all = []
         for xs, ys in zip(xs_list, ys_list):
@@ -355,7 +440,6 @@ class MainWindow(QtWidgets.QWidget):
         self.plot.setYRange(ymin - pady, ymax + pady, padding=0)
 
     def _curve_data_until(self, states, idx):
-        """Return (xs, ys) for states[:idx+1], idx clipped to states length-1."""
         if len(states) == 0:
             return None, None
         j = min(idx, len(states) - 1)
@@ -363,14 +447,12 @@ class MainWindow(QtWidgets.QWidget):
         return arr[:, 1], arr[:, 2]
 
     def _pose_at(self, states, idx):
-        """Return pose tuple at idx for a track, or None."""
         if len(states) == 0:
             return None
         j = min(idx, len(states) - 1)
-        return states[j]  # (t,x,y,yaw_deg,init,paused)
+        return states[j]
 
     def _track_pivot(self, key: str):
-        """Return (x0,y0) pivot for track rotation (its first point), or None."""
         st = self.states_eskf if key == "eskf" else (self.states_dr if key == "dr" else self.states_gnss)
         if len(st) == 0:
             return None
@@ -379,7 +461,6 @@ class MainWindow(QtWidgets.QWidget):
     def render_at_index(self, idx: int):
         idx = int(np.clip(idx, 0, self.max_len() - 1))
 
-        # --- curves (apply per-track offset around each track's first point) ---
         xs_eskf = ys_eskf = None
         xs_dr   = ys_dr   = None
         xs_gnss = ys_gnss = None
@@ -411,20 +492,19 @@ class MainWindow(QtWidgets.QWidget):
         else:
             self.curve_gnss.setData([], [])
 
-        # --- choose vehicle pose source ---
+        # choose pose source
         src = self.pose_src_combo.currentIndex()
-
         pose = None
         pose_is_gnss = False
         src_key = "eskf"
 
-        if src == 0:  # ESKF
+        if src == 0:
             src_key = "eskf"
             pose = self._pose_at(self.states_eskf, idx) or self._pose_at(self.states_dr, idx)
-        elif src == 1:  # DR
+        elif src == 1:
             src_key = "dr"
             pose = self._pose_at(self.states_dr, idx) or self._pose_at(self.states_eskf, idx)
-        else:  # GNSS (no heading)
+        else:
             src_key = "gnss"
             pose = self._pose_at(self.states_gnss, idx)
             pose_is_gnss = True
@@ -440,7 +520,7 @@ class MainWindow(QtWidgets.QWidget):
 
         t, px, py, yaw_deg, init, paused = pose
 
-        # --- apply offset to pose position & yaw to match rotated display ---
+        # apply offset to pose position & yaw
         pivot = self._track_pivot(src_key)
         off = self.track_offset_deg(src_key)
         if pivot is not None:
@@ -450,10 +530,9 @@ class MainWindow(QtWidgets.QWidget):
             pxr, pyr = rotate_xy_about_origin(px_arr, py_arr, off, x0, y0)
             px, py = float(pxr[0]), float(pyr[0])
 
-        # yaw 加 offset（GNSS 也加无所谓，但 GNSS 不画车体）
         yaw_deg = wrap_deg(yaw_deg + off)
 
-        # --- labels ---
+        # labels
         self.mode_label.setText("mode: LIVE" if self.live else "mode: HISTORY")
         self.slider_info.setText(f"{idx+1} / {self.max_len()}")
 
@@ -462,7 +541,6 @@ class MainWindow(QtWidgets.QWidget):
         self.pos_label.setText(f"pos: [{px:.3f}, {py:.3f}, 0.000]")
 
         if int(init) == 0 or pose_is_gnss:
-            # GNSS 本身没有可靠 yaw，直接不显示 yaw
             self.yaw_label.setText("yaw: --- deg")
         else:
             self.yaw_label.setText(f"yaw: {wrap_deg(yaw_deg):+.2f} deg")
@@ -483,7 +561,7 @@ class MainWindow(QtWidgets.QWidget):
                 brush=pg.mkBrush(50, 150, 255, 120)
             )
 
-        # view update (fit uses the rotated curves we already computed)
+        # view update
         xs_list = [xs_eskf if self.cb_eskf.isChecked() else None,
                    xs_dr   if self.cb_dr.isChecked()   else None,
                    xs_gnss if self.cb_gnss.isChecked() else None]
@@ -561,6 +639,6 @@ class MainWindow(QtWidgets.QWidget):
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
     w = MainWindow()
-    w.resize(1250, 680)
+    w.resize(1300, 720)
     w.show()
     sys.exit(app.exec_())
